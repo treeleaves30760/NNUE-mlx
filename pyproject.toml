@@ -3,7 +3,7 @@ requires = ["setuptools>=68.0", "numpy>=1.26.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "nnue-mps"
+name = "nnue-mlx"
 version = "0.1.0"
 description = "NNUE chess/shogi AI with Apple MLX training on Apple Silicon"
 requires-python = ">=3.11"

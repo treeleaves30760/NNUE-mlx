@@ -1,4 +1,4 @@
-# NNUE-mps
+# NNUE-mlx
 
 NNUE (Efficiently Updatable Neural Network) board game AI, trained on Apple Silicon via [MLX](https://github.com/ml-explore/mlx) with unified memory.
 

@@ -55,7 +55,7 @@ class GameApp:
 
     def __init__(self):
         pygame.init()
-        pygame.display.set_caption("NNUE-mps Board Games (MLX)")
+        pygame.display.set_caption("NNUE-mlx Board Games")
         self.screen = pygame.display.set_mode((self.W, self.H))
         self.clock = pygame.time.Clock()
 
@@ -106,7 +106,7 @@ class GameApp:
             cx = self.W // 2
 
             # Title
-            self._blit_centered(self.title_font, "NNUE-mps", cx, 45, _TEXT)
+            self._blit_centered(self.title_font, "NNUE-mlx", cx, 45, _TEXT)
             self._blit_centered(self.small_font,
                                 "Board Game AI with Apple MLX Training",
                                 cx, 88, _TEXT_DIM)
@@ -139,7 +139,7 @@ class GameApp:
                                             str(self.ai_depth), 210)
             t_minus, t_plus = self._stepper(cx + 30, y, "Time Limit",
                                             f"{self.ai_time_sec}s", 210)
-            y += 52
+            y += 68
 
             # ---- ANALYSIS ----
             analysis_label = "Analysis: ON" if self.analysis_on else "Analysis: OFF"
@@ -343,29 +343,7 @@ class GameApp:
                     if not rect.collidepoint(mx, my):
                         continue
                     handled = True
-                    if key.startswith("mode:"):
-                        self.mode = key[5:]
-                        if self.mode in ("human-vs-ai", "ai-vs-ai"):
-                            _ensure_ai()
-                    elif key == "depth-":
-                        self.ai_depth = max(_DEPTH_MIN, self.ai_depth - 1)
-                        if ai_searcher:
-                            ai_searcher.max_depth = self.ai_depth
-                    elif key == "depth+":
-                        self.ai_depth = min(_DEPTH_MAX, self.ai_depth + 1)
-                        if ai_searcher:
-                            ai_searcher.max_depth = self.ai_depth
-                    elif key == "time-":
-                        i = _time_idx(self.ai_time_sec)
-                        self.ai_time_sec = _TIME_STEPS[max(0, i - 1)]
-                        if ai_searcher:
-                            ai_searcher.time_limit_ms = self.ai_time_sec * 1000
-                    elif key == "time+":
-                        i = _time_idx(self.ai_time_sec)
-                        self.ai_time_sec = _TIME_STEPS[min(len(_TIME_STEPS) - 1, i + 1)]
-                        if ai_searcher:
-                            ai_searcher.time_limit_ms = self.ai_time_sec * 1000
-                    elif key == "hint":
+                    if key == "hint":
                         self.analysis_on = not self.analysis_on
                         if self.analysis_on:
                             _launch_analysis()
@@ -510,16 +488,17 @@ class GameApp:
                     hint_moves = moves
                     hint_depth = d
                     hint_done = done
-                    if moves:
-                        parts = [f"#{i+1} {m}({s:+.0f})"
-                                 for i, (m, s) in enumerate(moves)]
-                        tag = f"d{d}/{md}" + (" done" if done else "")
-                        status_text = f"Analysis ({tag}): " + "  ".join(parts)
 
                 # Auto-relaunch when state changed (new move made)
                 if analysis_state_id != id(state):
                     hint_moves = []; hint_depth = 0; hint_done = False
                     _launch_analysis()
+
+            # Live-update last chart score with analysis eval
+            if hint_moves and score_history:
+                best = hint_moves[0][1]
+                white_s = best if state.side_to_move() == WHITE else -best
+                score_history[-1] = white_s / 100.0
 
             # ============================================ TERMINAL
             if state.is_terminal():
@@ -588,6 +567,18 @@ class GameApp:
         w = pw - 28
         y = py + 14
 
+        # ---- Restart + Menu (top row) ----
+        btn_w = (w - 8) // 2
+        r = pygame.Rect(x, y, btn_w, 26)
+        rects["restart"] = r
+        self._panel_btn(r, "Restart (R)", False, r.collidepoint(mouse))
+        r = pygame.Rect(x + btn_w + 8, y, btn_w, 26)
+        rects["menu"] = r
+        self._panel_btn(r, "Menu (ESC)", False, r.collidepoint(mouse))
+        y += 34
+
+        self._sep(x, y, w); y += 8
+
         # ---- title + turn ----
         titles = {"chess": "Chess 8\u00d78", "minichess": "Los Alamos 6\u00d76",
                   "shogi": "Shogi 9\u00d79", "minishogi": "Mini Shogi 5\u00d75"}
@@ -603,26 +594,11 @@ class GameApp:
         pygame.draw.circle(scr, _TEXT_DIM, (cx_dot, y + 10), 7, 1)
         y += 28
 
-        self._sep(x, y, w); y += 8
-
-        # ---- MODE ----
-        lbl = self.small_font.render("MODE", True, _TEXT_DIM)
-        scr.blit(lbl, (x, y)); y += 20
-        bw = (w - 8) // 3
-        for i, (_, key) in enumerate(_MODES):
-            r = pygame.Rect(x + i * (bw + 4), y, bw, 28)
-            rects[f"mode:{key}"] = r
-            self._panel_btn(r, _MODE_SHORT[key],
-                            key == self.mode, r.collidepoint(mouse))
-        y += 38
-
-        # ---- SEARCH ----
-        lbl = self.small_font.render("SEARCH", True, _TEXT_DIM)
-        scr.blit(lbl, (x, y)); y += 20
-        dm, dp = self._stepper_inline(x, y, w, "Depth", str(self.ai_depth))
-        rects["depth-"] = dm; rects["depth+"] = dp; y += 32
-        tm, tp = self._stepper_inline(x, y, w, "Time", f"{self.ai_time_sec}s")
-        rects["time-"] = tm; rects["time+"] = tp; y += 38
+        # ---- info line (read-only) ----
+        mode_short = _MODE_SHORT.get(self.mode, self.mode)
+        info = f"{mode_short}  \u00b7  Depth {self.ai_depth}  \u00b7  Time {self.ai_time_sec}s"
+        lbl = self.small_font.render(info, True, _TEXT_MUTED)
+        scr.blit(lbl, (x, y)); y += 22
 
         self._sep(x, y, w); y += 8
 
@@ -632,27 +608,28 @@ class GameApp:
 
         if analysis_on:
             if hint_done:
-                hint_label = f"ON  -  depth {hint_depth} (done)"
+                toggle_lbl = f"ON  \u2014  depth {hint_depth} (done)"
             elif hint_depth > 0:
-                hint_label = f"ON  -  depth {hint_depth}/{_DEPTH_MAX}..."
+                toggle_lbl = f"ON  \u2014  depth {hint_depth}/{_DEPTH_MAX}..."
             else:
-                hint_label = "ON  -  starting..."
+                toggle_lbl = "ON  \u2014  starting..."
         else:
-            hint_label = "OFF  (H)"
-        r = pygame.Rect(x, y, w, 30)
+            toggle_lbl = "OFF  (H)"
+        r = pygame.Rect(x, y, w, 28)
         rects["hint"] = r
-        self._panel_btn(r, hint_label, analysis_on, r.collidepoint(mouse))
-        y += 36
+        self._panel_btn(r, toggle_lbl, analysis_on, r.collidepoint(mouse))
+        y += 34
 
-        r = pygame.Rect(x, y, w, 30)
-        rects["restart"] = r
-        self._panel_btn(r, "Restart  (R)", False, r.collidepoint(mouse))
-        y += 36
-
-        r = pygame.Rect(x, y, w, 30)
-        rects["menu"] = r
-        self._panel_btn(r, "Back to Menu  (ESC)", False, r.collidepoint(mouse))
-        y += 40
+        # Analysis move results
+        _rank_colors = [(255, 200, 40), (180, 180, 190), (200, 140, 80)]
+        if analysis_on and hint_moves:
+            for i, (move, score) in enumerate(hint_moves):
+                notation = self._move_notation(move, state)
+                line = f"#{i+1}  {notation}  {score:+.0f}"
+                c = _rank_colors[i] if i < len(_rank_colors) else _TEXT_DIM
+                s = self.small_font.render(line, True, c)
+                scr.blit(s, (x + 4, y)); y += 18
+            y += 4
 
         self._sep(x, y, w); y += 8
 
@@ -758,6 +735,53 @@ class GameApp:
         if line:
             lines.append(line)
         return lines
+
+    # ============================================================== notation
+    def _move_notation(self, move: Move, state) -> str:
+        """Format move as (Piece-from-to) for display."""
+        game = self.game_name
+        board = state.board_array()
+
+        # piece name
+        if move.drop_piece is not None:
+            pname = self._piece_name(game, move.drop_piece + 1)
+        elif move.from_sq is not None:
+            pname = self._piece_name(game, abs(board[move.from_sq]))
+        else:
+            pname = "?"
+
+        from_s = self._sq_to_coord(game, move.from_sq) \
+            if move.from_sq is not None else "00"
+        to_s = self._sq_to_coord(game, move.to_sq)
+        return f"({pname}-{from_s}-{to_s})"
+
+    @staticmethod
+    def _sq_to_coord(game: str, sq: int) -> str:
+        if game == "chess":
+            return f"{chr(97 + sq % 8)}{sq // 8 + 1}"
+        if game == "minichess":
+            return f"{chr(97 + sq % 6)}{sq // 6 + 1}"
+        if game == "shogi":
+            return f"{9 - sq % 9}{chr(97 + sq // 9)}"
+        if game == "minishogi":
+            return f"{5 - sq % 5}{chr(97 + sq // 5)}"
+        return str(sq)
+
+    @staticmethod
+    def _piece_name(game: str, board_val: int) -> str:
+        if game == "chess":
+            return {1: "P", 2: "N", 3: "B", 4: "R", 5: "Q", 6: "K"}.get(
+                board_val, "?")
+        if game == "minichess":
+            return {1: "P", 2: "N", 3: "R", 4: "Q", 5: "K"}.get(
+                board_val, "?")
+        if game == "shogi":
+            from src.gui.pieces import SHOGI_KANJI
+            return SHOGI_KANJI.get(board_val, "?")
+        if game == "minishogi":
+            from src.gui.pieces import MINISHOGI_KANJI
+            return MINISHOGI_KANJI.get(board_val, "?")
+        return "?"
 
     # ============================================================== chart
     @staticmethod
