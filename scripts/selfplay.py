@@ -29,23 +29,30 @@ def main():
     parser.add_argument("--model", default=None, help="NNUE model .npz for evaluation")
     parser.add_argument("--workers", type=int, default=0,
                         help="Parallel workers (0=auto, 1=single-process)")
+    parser.add_argument("--time-limit", type=int, default=2000,
+                        help="Time limit per move in ms (with model)")
     args = parser.parse_args()
 
     fs = FEATURE_SETS[args.game]()
 
+    # Build evaluator for single-process mode (fallback)
     evaluator = None
-    if args.model:
+    if args.model and args.workers == 1:
         from src.search.evaluator import NNUEEvaluator
         from src.search.alphabeta import AlphaBetaSearch
         nnue_eval = NNUEEvaluator.from_numpy(args.model, fs)
         evaluator = AlphaBetaSearch(
-            nnue_eval, max_depth=args.depth, time_limit_ms=2000,
+            nnue_eval, max_depth=args.depth, time_limit_ms=args.time_limit,
         )
 
     engine = SelfPlayEngine(
         feature_set=fs,
         evaluator=evaluator,
         search_depth=args.depth,
+        random_play_prob=0.1,
+        game_name=args.game,
+        model_path=args.model,
+        time_limit_ms=args.time_limit,
     )
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
