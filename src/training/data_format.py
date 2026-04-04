@@ -18,15 +18,14 @@ def write_sample(f: BinaryIO, white_features: List[int],
                  black_features: List[int], side_to_move: int,
                  score: int, result: int):
     """Write a single training sample to a binary file."""
-    f.write(struct.pack("<H", len(white_features)))
-    for idx in white_features:
-        f.write(struct.pack("<I", idx))
-    f.write(struct.pack("<H", len(black_features)))
-    for idx in black_features:
-        f.write(struct.pack("<I", idx))
-    f.write(struct.pack("<B", side_to_move))
-    f.write(struct.pack("<h", max(-32768, min(32767, score))))
-    f.write(struct.pack("<b", result))
+    nw = len(white_features)
+    nb = len(black_features)
+    # Pack everything in one call: header + features + header + features + tail
+    fmt = f"<H{nw}IH{nb}IBhb"
+    f.write(struct.pack(
+        fmt, nw, *white_features, nb, *black_features,
+        side_to_move, max(-32768, min(32767, score)), result,
+    ))
 
 
 def read_sample(f: BinaryIO):
