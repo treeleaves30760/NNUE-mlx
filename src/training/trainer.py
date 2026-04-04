@@ -1,0 +1,144 @@
+"""NNUE training loop with MLX on Apple Silicon."""
+
+from pathlib import Path
+
+import mlx.core as mx
+import mlx.nn as nn
+import mlx.optimizers as optim
+import numpy as np
+from mlx.utils import tree_flatten
+
+from src.model.device import device_info
+from src.model.nnue import NNUEModel
+from src.training.dataset import load_batches
+from src.training.loss import nnue_loss
+
+
+class ReduceLROnPlateau:
+    """Reduce learning rate when loss plateaus."""
+
+    def __init__(self, factor=0.3, patience=5, min_lr=1e-6):
+        self.factor = factor
+        self.patience = patience
+        self.min_lr = min_lr
+        self.best_loss = float('inf')
+        self.wait = 0
+
+    def step(self, loss: float, optimizer) -> float:
+        """Update and return current learning rate."""
+        current_lr = optimizer.learning_rate.item() if hasattr(
+            optimizer.learning_rate, 'item') else float(optimizer.learning_rate)
+        if loss < self.best_loss:
+            self.best_loss = loss
+            self.wait = 0
+        else:
+            self.wait += 1
+            if self.wait >= self.patience:
+                new_lr = max(current_lr * self.factor, self.min_lr)
+                if new_lr < current_lr:
+                    optimizer.learning_rate = new_lr
+                self.wait = 0
+        return current_lr
+
+
+class Trainer:
+    """Trains an NNUE model with MLX on Apple Silicon."""
+
+    def __init__(self, num_features: int, accumulator_size: int = 256,
+                 lr: float = 1e-3, batch_size: int = 2048,
+                 max_active: int = 32, lambda_: float = 0.5):
+        self.batch_size = batch_size
+        self.max_active = max_active
+        self.lambda_ = lambda_
+
+        self.model = NNUEModel(
+            num_features=num_features,
+            accumulator_size=accumulator_size,
+        )
+        mx.eval(self.model.parameters())  # Force initialization
+
+        self.optimizer = optim.Adam(learning_rate=lr)
+        self.scheduler = ReduceLROnPlateau(
+            factor=0.3, patience=5, min_lr=1e-6
+        )
+
+        # Build loss+grad function
+        self._loss_and_grad_fn = nn.value_and_grad(self.model, self._loss_fn)
+
+        # Compile the training step, declaring model/optimizer state so
+        # mx.compile can track mutations through the compiled graph.
+        self._state = [self.model.state, self.optimizer.state]
+        self._compiled_step = mx.compile(
+            self._train_step, inputs=self._state, outputs=self._state
+        )
+
+        print(f"Device: {device_info()}")
+        param_count = sum(p.size for _, p in tree_flatten(self.model.parameters()))
+        print(f"Model parameters: {param_count:,}")
+
+    def _loss_fn(self, model, batch):
+        """Loss function for value_and_grad. Takes model as first arg."""
+        pred = model(
+            batch["white_features"], batch["black_features"],
+            batch["white_mask"], batch["black_mask"],
+            batch["side_to_move"],
+        )
+        return nnue_loss(pred, batch["score"], batch["result"], self.lambda_)
+
+    def _train_step(self, batch):
+        """Single training step: forward + backward + optimizer update.
+
+        Compiled by mx.compile with state inputs/outputs to fuse the
+        entire step into one Metal compute graph.
+        """
+        loss, grads = self._loss_and_grad_fn(self.model, batch)
+        self.optimizer.update(self.model, grads)
+        return loss
+
+    def train_epoch(self, data_path: str) -> float:
+        """Train for one epoch on a data file.
+
+        Returns:
+            Average loss for the epoch.
+        """
+        self.model.train()
+        total_loss = mx.array(0.0)
+        num_batches = 0
+
+        for batch in load_batches(data_path, self.batch_size, self.max_active):
+            loss = self._compiled_step(batch)
+            # Eval loss to cap the lazy graph each batch.
+            # State (model params + optimizer) is managed by mx.compile.
+            mx.eval(loss)
+            total_loss = total_loss + loss
+            num_batches += 1
+
+        avg_loss = (total_loss / max(num_batches, 1)).item()
+        self.scheduler.step(avg_loss, self.optimizer)
+        return avg_loss
+
+    def save_checkpoint(self, filepath: str, epoch: int, loss: float):
+        """Save training checkpoint."""
+        Path(filepath).parent.mkdir(parents=True, exist_ok=True)
+        weights = dict(tree_flatten(self.model.parameters()))
+        sf_path = filepath.replace('.pt', '.safetensors')
+        mx.savez(sf_path, **{k: v for k, v in weights.items()})
+        meta_path = filepath.replace('.pt', '_meta.npz')
+        lr = self.optimizer.learning_rate
+        lr_val = lr.item() if hasattr(lr, 'item') else float(lr)
+        np.savez(meta_path, epoch=epoch, loss=loss, lr=lr_val)
+
+    def load_checkpoint(self, filepath: str) -> int:
+        """Load training checkpoint. Returns the epoch number."""
+        sf_path = filepath.replace('.pt', '.safetensors')
+        weights = dict(mx.load(sf_path))
+        self.model.load_weights(list(weights.items()))
+        meta_path = filepath.replace('.pt', '_meta.npz')
+        meta = np.load(meta_path)
+        return int(meta['epoch'])
+
+    def export_numpy(self, filepath: str):
+        """Export model weights as .npz for CPU inference during search."""
+        weights = {k: np.array(v) for k, v in tree_flatten(self.model.parameters())}
+        np.savez(filepath, **weights)
+        print(f"Exported numpy weights to {filepath}")
