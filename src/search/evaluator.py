@@ -77,6 +77,26 @@ class NNUEEvaluator:
         )
         return cls(accumulator, feature_set)
 
+    @classmethod
+    def from_weights_dict(cls, weights: dict, feature_set: FeatureSet) -> "NNUEEvaluator":
+        """Create evaluator from a pre-loaded dict of numpy arrays.
+
+        Keys must match: feature_table.weight, ft_bias, l1.weight, l1.bias,
+        l2.weight, l2.bias, output.weight, output.bias.
+        """
+        AccumClass = _AccelAccum if _HAS_ACCEL else IncrementalAccumulator
+        accumulator = AccumClass(
+            ft_weight=weights["feature_table.weight"],
+            ft_bias=weights["ft_bias"],
+            l1_weight=weights["l1.weight"],
+            l1_bias=weights["l1.bias"],
+            l2_weight=weights["l2.weight"],
+            l2_bias=weights["l2.bias"],
+            out_weight=weights["output.weight"],
+            out_bias=weights["output.bias"],
+        )
+        return cls(accumulator, feature_set)
+
 
 class MaterialEvaluator:
     """Simple material-counting evaluator for bootstrapping (no NNUE needed)."""
