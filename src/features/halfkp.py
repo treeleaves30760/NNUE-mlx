@@ -9,8 +9,16 @@ For Los Alamos 6x6: 36 king squares * (8 piece types * 36 squares) = 10,368 feat
 
 from typing import Dict, List, Optional, Tuple
 
+import numpy as np
+
 from src.features.base import FeatureSet
 from src.games.base import GameState, Move
+
+try:
+    from src.accel import halfkp_active_features as _c_active_features, _HAS_ACCEL
+except ImportError:
+    _c_active_features = None
+    _HAS_ACCEL = False
 
 
 class HalfKP(FeatureSet):
@@ -34,6 +42,16 @@ class HalfKP(FeatureSet):
         # Each piece type has two colors (own/opponent from perspective)
         self._piece_sq_combos = num_piece_types * 2 * num_squares
         self._total = num_squares * self._piece_sq_combos
+
+        # Pre-compute bv2type array for C extension
+        if board_val_to_type:
+            arr_len = king_board_val + 1
+            self._bv2type_arr = np.full(arr_len, -1, dtype=np.int8)
+            for bv, pt in board_val_to_type.items():
+                if bv < arr_len:
+                    self._bv2type_arr[bv] = pt
+        else:
+            self._bv2type_arr = None
 
     def num_features(self) -> int:
         return self._total
@@ -63,6 +81,17 @@ class HalfKP(FeatureSet):
 
     def active_features(self, state: GameState, perspective: int) -> List[int]:
         king_sq = state.king_square(perspective)
+
+        # C accelerated path
+        if _HAS_ACCEL and self._bv2type_arr is not None:
+            board = state.board_array()
+            return _c_active_features(
+                bytes(board), king_sq, perspective,
+                self._num_squares, self._num_piece_types,
+                self._king_board_val, bytes(self._bv2type_arr),
+            )
+
+        # Python fallback
         features = []
         for piece_type, color, sq in state.pieces_on_board():
             idx = self._feature_index(king_sq, piece_type, color, sq, perspective)

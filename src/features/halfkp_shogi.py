@@ -12,8 +12,16 @@ For mini shogi 5x5: board features + hand features
 
 from typing import Dict, List, Optional, Tuple
 
+import numpy as np
+
 from src.features.base import FeatureSet
 from src.games.base import GameState, Move
+
+try:
+    from src.accel import halfkp_shogi_active_features as _c_shogi_features, _HAS_ACCEL
+except ImportError:
+    _c_shogi_features = None
+    _HAS_ACCEL = False
 
 
 class HalfKPShogi(FeatureSet):
@@ -50,6 +58,16 @@ class HalfKPShogi(FeatureSet):
         self._hand_features = num_squares * self._hand_combos
 
         self._total = self._board_features + self._hand_features
+
+        # Pre-compute bv2type array for C extension
+        if board_val_to_type:
+            arr_len = max(board_val_to_type.keys()) + 1 if board_val_to_type else 0
+            self._bv2type_arr = np.full(arr_len, -1, dtype=np.int8)
+            for bv, pt in board_val_to_type.items():
+                if bv < arr_len:
+                    self._bv2type_arr[bv] = pt
+        else:
+            self._bv2type_arr = None
 
     def num_features(self) -> int:
         return self._total
@@ -89,18 +107,34 @@ class HalfKPShogi(FeatureSet):
 
     def active_features(self, state: GameState, perspective: int) -> List[int]:
         king_sq = state.king_square(perspective)
-        features = []
 
-        # Board piece features
+        # C accelerated path
+        if _HAS_ACCEL and self._bv2type_arr is not None:
+            board = state.board_array()
+            hand0 = state.hand_pieces(0)
+            hand1 = state.hand_pieces(1)
+            h0t = np.array(list(hand0.keys()), dtype=np.int32) if hand0 else np.array([], dtype=np.int32)
+            h0c = np.array(list(hand0.values()), dtype=np.int32) if hand0 else np.array([], dtype=np.int32)
+            h1t = np.array(list(hand1.keys()), dtype=np.int32) if hand1 else np.array([], dtype=np.int32)
+            h1c = np.array(list(hand1.values()), dtype=np.int32) if hand1 else np.array([], dtype=np.int32)
+            return _c_shogi_features(
+                bytes(board), king_sq, perspective,
+                self._num_squares, self._num_board_piece_types,
+                self._num_hand_piece_types, self._max_hand_count,
+                self._king_board_val, bytes(self._bv2type_arr),
+                self._board_features,
+                bytes(h0t), bytes(h0c), len(h0t),
+                bytes(h1t), bytes(h1c), len(h1t),
+            )
+
+        # Python fallback
+        features = []
         for piece_type, color, sq in state.pieces_on_board():
             idx = self._board_feature_index(king_sq, piece_type, color, sq, perspective)
             features.append(idx)
-
-        # Hand piece features for both sides
         for side in [0, 1]:
             hand = state.hand_pieces(side)
             features.extend(self._hand_feature_indices(king_sq, hand, side, perspective))
-
         return features
 
     def feature_delta(
