@@ -24,7 +24,7 @@ def write_sample(f: BinaryIO, white_features: List[int],
     fmt = f"<H{nw}IH{nb}IBhb"
     f.write(struct.pack(
         fmt, nw, *white_features, nb, *black_features,
-        side_to_move, max(-32768, min(32767, score)), result,
+        side_to_move, int(max(-32768, min(32767, score))), int(result),
     ))
 
 
