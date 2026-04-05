@@ -334,8 +334,18 @@ def _king_sq(board: np.ndarray, side: int) -> int:
     return idx
 
 
+try:
+    from src.accel import is_square_attacked_shogi as _c_is_sq_attacked
+except ImportError:
+    _c_is_sq_attacked = None
+
+
 def _is_square_attacked(board: np.ndarray, sq: int, by_side: int) -> bool:
     """Return True if sq is attacked by any piece of by_side."""
+    if _c_is_sq_attacked is not None:
+        return _c_is_sq_attacked(bytes(board), sq, by_side)
+
+    # Python fallback
     sign = 1 if by_side == WHITE else -1
     for s in range(81):
         p = board[s]

@@ -8,6 +8,12 @@ from src.games.base import GameState, Move
 from src.search.transposition import TranspositionTable, EXACT, ALPHA, BETA
 from src.search.move_ordering import MoveOrdering
 
+try:
+    from src.accel import CSearch as _CSearch, AcceleratedAccumulator as _AccelAccum
+except ImportError:
+    _CSearch = None
+    _AccelAccum = None
+
 # Large value representing a won/lost position
 INF = 1_000_000
 MATE_SCORE = 100_000
@@ -29,16 +35,50 @@ class AlphaBetaSearch:
         self._stop_event: Optional[threading.Event] = None
         self._use_inplace = False
 
+        # Try to create C search engine for maximum speed
+        self._csearch = None
+        if (_CSearch is not None and _AccelAccum is not None
+                and hasattr(evaluator, 'accumulator')
+                and isinstance(evaluator.accumulator, _AccelAccum)):
+            try:
+                cfg = getattr(evaluator.feature_set, '_num_squares', 64)
+                self._csearch = _CSearch(
+                    accumulator=evaluator.accumulator,
+                    feature_set=evaluator.feature_set,
+                    tt_size=1 << 20,
+                    eval_scale=getattr(evaluator, 'EVAL_OUTPUT_SCALE', 128.0),
+                    max_sq=cfg,
+                )
+            except Exception:
+                self._csearch = None
+
     def search(self, state: GameState,
                depth_override: Optional[int] = None) -> Tuple[Optional[Move], float]:
         """Find the best move using iterative deepening alpha-beta."""
+        max_d = depth_override or self.max_depth
+
+        # C fast path: use CSearch when available and state supports inplace
+        if self._csearch is not None and hasattr(state, 'make_move_inplace'):
+            self.evaluator.set_position(state)
+            result = self._csearch.search(state, max_d, float(self.time_limit_ms))
+            if result is not None:
+                (from_sq, to_sq, promo, drop), score, nodes = result
+                self.nodes_searched = nodes
+                move = Move(
+                    from_sq=from_sq,
+                    to_sq=to_sq,
+                    promotion=promo,
+                    drop_piece=drop,
+                )
+                return move, score
+
+        # Python fallback
         self._start_time = time.time()
         self._time_up = False
         self.nodes_searched = 0
         self._use_inplace = hasattr(state, 'make_move_inplace')
         self.evaluator.set_position(state)
 
-        max_d = depth_override or self.max_depth
         best_move = None
         best_score = -INF
 

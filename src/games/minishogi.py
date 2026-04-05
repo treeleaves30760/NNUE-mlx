@@ -454,9 +454,18 @@ def _is_in_check(board: np.ndarray, side: int) -> bool:
     return _is_square_attacked(board, king_sq, side)
 
 
+try:
+    from src.accel import is_square_attacked_minishogi as _c_is_sq_attacked_mini
+except ImportError:
+    _c_is_sq_attacked_mini = None
+
+
 def _is_square_attacked(board: np.ndarray, sq: int, defending_side: int) -> bool:
     """Return True if *sq* is attacked by the opponent of *defending_side*."""
     attacker_side = 1 - defending_side
+    if _c_is_sq_attacked_mini is not None:
+        return _c_is_sq_attacked_mini(bytes(board), sq, attacker_side)
+
     attacker_sign = _sign(attacker_side)
     rank = _rank(sq)
     file = _file(sq)

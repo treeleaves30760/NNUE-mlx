@@ -73,20 +73,10 @@ class NNUEEvaluator:
 
         Uses the accelerated C extension (NEON SIMD + Accelerate) when
         available, falling back to the pure-numpy IncrementalAccumulator.
+        Supports int16 quantized weights (auto-detected from dtype).
         """
         data = np.load(npz_path)
-        AccumClass = _AccelAccum if _HAS_ACCEL else IncrementalAccumulator
-        accumulator = AccumClass(
-            ft_weight=data["feature_table.weight"],
-            ft_bias=data["ft_bias"],
-            l1_weight=data["l1.weight"],
-            l1_bias=data["l1.bias"],
-            l2_weight=data["l2.weight"],
-            l2_bias=data["l2.bias"],
-            out_weight=data["output.weight"],
-            out_bias=data["output.bias"],
-        )
-        return cls(accumulator, feature_set)
+        return cls._build_from_data(data, feature_set)
 
     @classmethod
     def from_weights_dict(cls, weights: dict, feature_set: FeatureSet) -> "NNUEEvaluator":
@@ -94,18 +84,54 @@ class NNUEEvaluator:
 
         Keys must match: feature_table.weight, ft_bias, l1.weight, l1.bias,
         l2.weight, l2.bias, output.weight, output.bias.
+        Supports int16 quantized weights (auto-detected from dtype).
         """
-        AccumClass = _AccelAccum if _HAS_ACCEL else IncrementalAccumulator
-        accumulator = AccumClass(
-            ft_weight=weights["feature_table.weight"],
-            ft_bias=weights["ft_bias"],
-            l1_weight=weights["l1.weight"],
-            l1_bias=weights["l1.bias"],
-            l2_weight=weights["l2.weight"],
-            l2_bias=weights["l2.bias"],
-            out_weight=weights["output.weight"],
-            out_bias=weights["output.bias"],
-        )
+        return cls._build_from_data(weights, feature_set)
+
+    @classmethod
+    def _build_from_data(cls, data, feature_set: FeatureSet) -> "NNUEEvaluator":
+        """Build evaluator from weight data (dict or NpzFile)."""
+        ft_weight = data["feature_table.weight"]
+        is_quantized = ft_weight.dtype == np.int16
+        quant_scale = float(data["quant_scale"]) if "quant_scale" in data else 512.0
+
+        if is_quantized and _HAS_ACCEL:
+            # Pass int16 weights directly to C extension (auto-detects dtype)
+            accumulator = _AccelAccum(
+                ft_weight=ft_weight,
+                ft_bias=data["ft_bias"],
+                l1_weight=data["l1.weight"],
+                l1_bias=data["l1.bias"],
+                l2_weight=data["l2.weight"],
+                l2_bias=data["l2.bias"],
+                out_weight=data["output.weight"],
+                out_bias=data["output.bias"],
+                quant_scale=quant_scale,
+            )
+        elif is_quantized:
+            # No C extension: dequantize to float32 for numpy fallback
+            accumulator = IncrementalAccumulator(
+                ft_weight=ft_weight.astype(np.float32) / quant_scale,
+                ft_bias=data["ft_bias"].astype(np.float32) / quant_scale,
+                l1_weight=data["l1.weight"],
+                l1_bias=data["l1.bias"],
+                l2_weight=data["l2.weight"],
+                l2_bias=data["l2.bias"],
+                out_weight=data["output.weight"],
+                out_bias=data["output.bias"],
+            )
+        else:
+            AccumClass = _AccelAccum if _HAS_ACCEL else IncrementalAccumulator
+            accumulator = AccumClass(
+                ft_weight=ft_weight,
+                ft_bias=data["ft_bias"],
+                l1_weight=data["l1.weight"],
+                l1_bias=data["l1.bias"],
+                l2_weight=data["l2.weight"],
+                l2_bias=data["l2.bias"],
+                out_weight=data["output.weight"],
+                out_bias=data["output.bias"],
+            )
         return cls(accumulator, feature_set)
 
 
