@@ -4,6 +4,7 @@ import atexit
 import io
 import os
 import random
+import signal
 import time
 from concurrent.futures import ProcessPoolExecutor
 from multiprocessing.shared_memory import SharedMemory
@@ -255,7 +256,7 @@ class SelfPlayEngine:
         chunks = _split_work(num_games, workers)
 
         with open(output_path, "wb") as f:
-            with ProcessPoolExecutor(max_workers=workers) as pool:
+            with _managed_pool(workers) as pool:
                 futures = [
                     pool.submit(
                         _worker_play_games,
@@ -284,7 +285,7 @@ class SelfPlayEngine:
         try:
             shm_info = shm_mgr.get_shm_info()
             with open(output_path, "wb") as f:
-                with ProcessPoolExecutor(max_workers=workers) as pool:
+                with _managed_pool(workers) as pool:
                     futures = [
                         pool.submit(
                             _worker_play_games_with_model,
@@ -304,6 +305,79 @@ class SelfPlayEngine:
 
         print(f"Generated data from {num_games} games")
         print(f"Saved to {output_path}")
+
+
+class _managed_pool:
+    """ProcessPoolExecutor wrapper that kills workers on unexpected exit.
+
+    Workers are started with SIGINT ignored so only the parent handles
+    KeyboardInterrupt.  On context-manager exit (normal or via exception /
+    signal), all worker processes are terminated and joined.
+    """
+
+    def __init__(self, max_workers: int):
+        self._max_workers = max_workers
+        self._pool: Optional[ProcessPoolExecutor] = None
+        self._prev_sigint = None
+        self._prev_sigterm = None
+
+    def __enter__(self) -> ProcessPoolExecutor:
+        self._pool = ProcessPoolExecutor(
+            max_workers=self._max_workers,
+            initializer=_worker_ignore_sigint,
+        )
+        # Install signal handlers so that SIGINT/SIGTERM clean up workers
+        self._prev_sigint = signal.getsignal(signal.SIGINT)
+        self._prev_sigterm = signal.getsignal(signal.SIGTERM)
+
+        def _shutdown(signum, frame):
+            self._kill_workers()
+            # Re-raise so the caller sees the interruption
+            if signum == signal.SIGINT:
+                raise KeyboardInterrupt
+            raise SystemExit(1)
+
+        signal.signal(signal.SIGINT, _shutdown)
+        signal.signal(signal.SIGTERM, _shutdown)
+        return self._pool
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        # Restore original signal handlers
+        if self._prev_sigint is not None:
+            signal.signal(signal.SIGINT, self._prev_sigint)
+        if self._prev_sigterm is not None:
+            signal.signal(signal.SIGTERM, self._prev_sigterm)
+        self._kill_workers()
+        return False
+
+    def _kill_workers(self):
+        if self._pool is None:
+            return
+        # Kill each worker process directly
+        for pid in _get_pool_pids(self._pool):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, OSError):
+                pass
+        self._pool.shutdown(wait=False, cancel_futures=True)
+        self._pool = None
+
+
+def _worker_ignore_sigint():
+    """Worker initializer: ignore SIGINT so only the parent handles it."""
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+
+def _get_pool_pids(pool: ProcessPoolExecutor) -> List[int]:
+    """Extract PIDs from a ProcessPoolExecutor's internal process map."""
+    pids = []
+    # _processes is a dict {pid: process} in CPython's implementation
+    processes = getattr(pool, '_processes', None)
+    if processes is not None:
+        for proc in processes.values():
+            if proc.is_alive():
+                pids.append(proc.pid)
+    return pids
 
 
 def _split_work(num_games: int, workers: int) -> List[int]:
