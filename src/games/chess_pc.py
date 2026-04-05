@@ -106,12 +106,16 @@ class PythonChessState(GameState):
         return PythonChessState(self._board.copy())
 
     def is_terminal(self) -> bool:
-        return self._board.is_game_over(claim_draw=True)
+        # Don't use claim_draw=True here because python-chess's
+        # can_claim_threefold_repetition() internally pops/replays the
+        # entire move stack, which breaks when make_move_inplace has
+        # pushed search-tree moves onto the stack.
+        return self._board.is_game_over(claim_draw=False)
 
     def result(self) -> Optional[float]:
-        if not self._board.is_game_over(claim_draw=True):
+        if not self._board.is_game_over(claim_draw=False):
             return None
-        outcome = self._board.outcome(claim_draw=True)
+        outcome = self._board.outcome(claim_draw=False)
         if outcome is None:
             return 0.5
         if outcome.winner is None:
