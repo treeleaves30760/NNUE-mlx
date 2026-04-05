@@ -270,7 +270,7 @@ class GameApp:
                 return
             fresh_live = [None]
             current_analysis_live = fresh_live
-            _st, _stop = state, analysis_stop
+            _st, _stop = state.copy(), analysis_stop
             _ev = self._make_evaluator(self.game_name, self.model_path)
             from src.search.alphabeta import AlphaBetaSearch
             _hs = AlphaBetaSearch(_ev, max_depth=_DEPTH_MAX,
@@ -457,7 +457,7 @@ class GameApp:
                 if should:
                     ai_thinking = True
                     status_text = "AI thinking..."
-                    _st2 = state
+                    _st2 = state.copy()
                     def _ai():
                         ai_result[0] = ai_searcher.search(_st2)
                     threading.Thread(target=_ai, daemon=True).start()
