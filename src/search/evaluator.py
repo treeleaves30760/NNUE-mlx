@@ -28,12 +28,16 @@ class NNUEEvaluator:
         bf = self.feature_set.active_features(state, 1)
         self.accumulator.refresh(wf, bf)
 
+    # Scale raw NNUE output to centipawn-like range for search.
+    # Trained with OUTPUT_SCALE=32 in loss, so model output of 1.0 ≈ 32 cp.
+    EVAL_OUTPUT_SCALE = 128.0
+
     def evaluate(self, state: GameState) -> float:
         """Evaluate current position using the accumulator.
 
-        Returns score from side-to-move's perspective.
+        Returns score from side-to-move's perspective in centipawn-like units.
         """
-        return self.accumulator.evaluate(state.side_to_move())
+        return self.accumulator.evaluate(state.side_to_move()) * self.EVAL_OUTPUT_SCALE
 
     def push_move(self, state_before: GameState, move: Move,
                   state_after: GameState):

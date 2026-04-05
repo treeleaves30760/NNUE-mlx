@@ -5,8 +5,11 @@ Blends evaluation accuracy with game-result prediction using sigmoid scaling.
 
 import mlx.core as mx
 
-# Standard scaling factor to convert centipawns to win probability
+# Scaling factor to convert centipawns to win probability.
+# The model output is multiplied by OUTPUT_SCALE before sigmoid to allow
+# the small-magnitude NNUE output (~1-50) to span the full [0, 1] range.
 EVAL_SCALE = 410.0
+OUTPUT_SCALE = 32.0  # Model output × OUTPUT_SCALE → centipawn-like range
 
 
 def nnue_loss(predicted: mx.array, score: mx.array,
@@ -14,7 +17,8 @@ def nnue_loss(predicted: mx.array, score: mx.array,
     """Blended loss between search score fitting and game result fitting.
 
     Both the model output and search score are passed through sigmoid to
-    map centipawn values into [0, 1] win-probability space.
+    map into [0, 1] win-probability space. Model output is scaled up by
+    OUTPUT_SCALE to compensate for the small magnitude of NNUE outputs.
 
     Args:
         predicted: Model output, shape (batch, 1).
@@ -25,7 +29,7 @@ def nnue_loss(predicted: mx.array, score: mx.array,
     Returns:
         Scalar loss value.
     """
-    p = mx.sigmoid(mx.squeeze(predicted, axis=-1) / EVAL_SCALE)
+    p = mx.sigmoid(mx.squeeze(predicted, axis=-1) * OUTPUT_SCALE / EVAL_SCALE)
     t_eval = mx.sigmoid(score / EVAL_SCALE)
     target = lambda_ * t_eval + (1.0 - lambda_) * result
     return mx.mean((p - target) ** 2)
