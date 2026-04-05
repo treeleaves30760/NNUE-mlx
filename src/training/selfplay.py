@@ -364,6 +364,8 @@ def _worker_play_games_with_model(
     searcher = AlphaBetaSearch(
         evaluator, max_depth=search_depth, time_limit_ms=time_limit_ms,
     )
+    # Disable CSearch in worker processes to avoid fork+C-extension hangs
+    searcher._csearch = None
     engine = SelfPlayEngine(
         feature_set=fs,
         evaluator=searcher,
