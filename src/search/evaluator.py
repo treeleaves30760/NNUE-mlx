@@ -52,6 +52,13 @@ class NNUEEvaluator:
                 added, removed = delta
                 self.accumulator.update(perspective, added, removed)
 
+    def push_move_refresh(self, state_after: GameState):
+        """Full accumulator refresh for use with make_move_inplace."""
+        self.accumulator.push()
+        wf = self.feature_set.active_features(state_after, 0)
+        bf = self.feature_set.active_features(state_after, 1)
+        self.accumulator.refresh(wf, bf)
+
     def pop_move(self):
         """Restore accumulator state after unmaking a move."""
         self.accumulator.pop()

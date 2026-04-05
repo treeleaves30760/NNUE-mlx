@@ -121,8 +121,8 @@ class Trainer:
         """Save training checkpoint."""
         Path(filepath).parent.mkdir(parents=True, exist_ok=True)
         weights = dict(tree_flatten(self.model.parameters()))
-        sf_path = filepath.replace('.pt', '.safetensors')
-        mx.savez(sf_path, **{k: v for k, v in weights.items()})
+        wt_path = filepath.replace('.pt', '.npz')
+        np.savez(wt_path, **{k: np.array(v) for k, v in weights.items()})
         meta_path = filepath.replace('.pt', '_meta.npz')
         lr = self.optimizer.learning_rate
         lr_val = lr.item() if hasattr(lr, 'item') else float(lr)
@@ -130,9 +130,10 @@ class Trainer:
 
     def load_checkpoint(self, filepath: str) -> int:
         """Load training checkpoint. Returns the epoch number."""
-        sf_path = filepath.replace('.pt', '.safetensors')
-        weights = dict(mx.load(sf_path))
-        self.model.load_weights(list(weights.items()))
+        wt_path = filepath.replace('.pt', '.npz')
+        data = np.load(wt_path)
+        weights = [(k, mx.array(data[k])) for k in data.files]
+        self.model.load_weights(weights)
         meta_path = filepath.replace('.pt', '_meta.npz')
         meta = np.load(meta_path)
         return int(meta['epoch'])

@@ -18,12 +18,6 @@ class AlphaBetaSearch:
 
     def __init__(self, evaluator, max_depth: int = 6,
                  time_limit_ms: int = 5000):
-        """
-        Args:
-            evaluator: An NNUEEvaluator or MaterialEvaluator.
-            max_depth: Maximum search depth.
-            time_limit_ms: Time limit per move in milliseconds.
-        """
         self.evaluator = evaluator
         self.max_depth = max_depth
         self.time_limit_ms = time_limit_ms
@@ -33,21 +27,15 @@ class AlphaBetaSearch:
         self._start_time = 0.0
         self._time_up = False
         self._stop_event: Optional[threading.Event] = None
+        self._use_inplace = False
 
     def search(self, state: GameState,
                depth_override: Optional[int] = None) -> Tuple[Optional[Move], float]:
-        """Find the best move using iterative deepening alpha-beta.
-
-        Args:
-            state: Current game position.
-            depth_override: If set, search to exactly this depth.
-
-        Returns:
-            (best_move, score) tuple.
-        """
+        """Find the best move using iterative deepening alpha-beta."""
         self._start_time = time.time()
         self._time_up = False
         self.nodes_searched = 0
+        self._use_inplace = hasattr(state, 'make_move_inplace')
         self.evaluator.set_position(state)
 
         max_d = depth_override or self.max_depth
@@ -66,41 +54,28 @@ class AlphaBetaSearch:
 
     def search_top_n(self, state: GameState,
                      n: int = 3) -> List[Tuple[Move, float]]:
-        """Return the top *n* moves sorted by score (best first).
-
-        Runs iterative deepening up to ``self.max_depth`` and collects
-        root-level scores for every legal move at the deepest completed
-        iteration.
-        """
+        """Return the top *n* moves sorted by score (best first)."""
         self._start_time = time.time()
         self._time_up = False
         self.nodes_searched = 0
+        self._use_inplace = hasattr(state, 'make_move_inplace')
         self.evaluator.set_position(state)
 
         moves = state.legal_moves()
         if not moves:
             return []
 
-        # Will be updated each completed iteration
         best_scores: List[Tuple[Move, float]] = [(m, -INF) for m in moves]
 
         for depth in range(1, self.max_depth + 1):
             iteration_scores: List[Tuple[Move, float]] = []
-
-            # Order using previous iteration's best move via TT
             tt_entry = self.tt.probe(state.zobrist_hash())
             ordered = self.move_ordering.order_moves(state, moves, depth, tt_entry)
 
             for move in ordered:
-                new_state = state.make_move(move)
-                self.evaluator.push_move(state, move, new_state)
-                # Full window so every root move gets an accurate score
-                score = -self._alphabeta(new_state, depth - 1, -INF, INF)
-                self.evaluator.pop_move()
-
+                score = self._do_move_and_search(state, move, depth - 1, -INF, INF)
                 if self._time_up:
                     break
-
                 iteration_scores.append((move, score))
 
             if self._time_up and depth > 1:
@@ -115,16 +90,12 @@ class AlphaBetaSearch:
                           live_ref: Optional[list] = None,
                           stop_event: Optional[threading.Event] = None,
                           ) -> List[Tuple[Move, float]]:
-        """Iterative deepening that publishes results after each depth.
-
-        Writes ``(depth, max_depth, top_n, is_done)`` to ``live_ref[0]``
-        after every completed iteration so the UI can update in real time.
-        Set *stop_event* to abort the search early.
-        """
+        """Iterative deepening that publishes results after each depth."""
         self._stop_event = stop_event
         self._start_time = time.time()
         self._time_up = False
         self.nodes_searched = 0
+        self._use_inplace = hasattr(state, 'make_move_inplace')
         self.evaluator.set_position(state)
 
         moves = state.legal_moves()
@@ -142,7 +113,6 @@ class AlphaBetaSearch:
                 break
 
             iteration_scores: List[Tuple[Move, float]] = []
-
             tt_entry = self.tt.probe(state.zobrist_hash())
             ordered = self.move_ordering.order_moves(state, moves, depth, tt_entry)
 
@@ -151,10 +121,7 @@ class AlphaBetaSearch:
                 if stop_event and stop_event.is_set():
                     aborted = True
                     break
-                new_state = state.make_move(move)
-                self.evaluator.push_move(state, move, new_state)
-                score = -self._alphabeta(new_state, depth - 1, -INF, INF)
-                self.evaluator.pop_move()
+                score = self._do_move_and_search(state, move, depth - 1, -INF, INF)
                 if self._time_up or (stop_event and stop_event.is_set()):
                     aborted = True
                     break
@@ -165,18 +132,35 @@ class AlphaBetaSearch:
             best_scores = iteration_scores
             final_depth = depth
 
-            # Publish intermediate result
             top_n = sorted(best_scores, key=lambda x: x[1], reverse=True)[:n]
             done = (depth == self.max_depth)
             if live_ref is not None:
                 live_ref[0] = (depth, self.max_depth, top_n, done)
 
-        # Final publish
         top_n = sorted(best_scores, key=lambda x: x[1], reverse=True)[:n]
         if live_ref is not None:
             live_ref[0] = (final_depth, self.max_depth, top_n, True)
         self._stop_event = None
         return top_n
+
+    def _do_move_and_search(self, state: GameState, move: Move,
+                            depth: int, alpha: float, beta: float) -> float:
+        """Apply move, search recursively, then undo. Returns -negamax score."""
+        if self._use_inplace:
+            undo = state.make_move_inplace(move)
+            if hasattr(self.evaluator, 'push_move_refresh'):
+                self.evaluator.push_move_refresh(state)
+            else:
+                self.evaluator.push_move(state, move, state)
+            score = -self._alphabeta(state, depth, -beta, -alpha)
+            self.evaluator.pop_move()
+            state.unmake_move(undo)
+        else:
+            new_state = state.make_move(move)
+            self.evaluator.push_move(state, move, new_state)
+            score = -self._alphabeta(new_state, depth, -beta, -alpha)
+            self.evaluator.pop_move()
+        return score
 
     def _search_root(self, state: GameState,
                      depth: int) -> Tuple[Optional[Move], float]:
@@ -194,18 +178,12 @@ class AlphaBetaSearch:
         beta = INF
 
         for move in moves:
-            new_state = state.make_move(move)
-            self.evaluator.push_move(state, move, new_state)
-            score = -self._alphabeta(new_state, depth - 1, -beta, -alpha)
-            self.evaluator.pop_move()
-
+            score = self._do_move_and_search(state, move, depth - 1, alpha, beta)
             if self._time_up:
                 break
-
             if score > best_score:
                 best_score = score
                 best_move = move
-
             if score > alpha:
                 alpha = score
 
@@ -233,10 +211,10 @@ class AlphaBetaSearch:
             if result is None:
                 return 0
             if result == 1.0:
-                return MATE_SCORE - (self.max_depth - depth)  # Prefer shorter mates
+                return MATE_SCORE - (self.max_depth - depth)
             if result == 0.0:
                 return -MATE_SCORE + (self.max_depth - depth)
-            return 0  # Draw
+            return 0
 
         # Leaf node: evaluate
         if depth <= 0:
@@ -256,10 +234,9 @@ class AlphaBetaSearch:
         # Generate and order moves
         moves = state.legal_moves()
         if not moves:
-            # No legal moves: checkmate or stalemate
             if state.is_check():
                 return -MATE_SCORE + (self.max_depth - depth)
-            return 0  # Stalemate = draw
+            return 0
 
         moves = self.move_ordering.order_moves(state, moves, depth, tt_entry)
 
@@ -268,10 +245,7 @@ class AlphaBetaSearch:
         flag = ALPHA
 
         for move in moves:
-            new_state = state.make_move(move)
-            self.evaluator.push_move(state, move, new_state)
-            score = -self._alphabeta(new_state, depth - 1, -beta, -alpha)
-            self.evaluator.pop_move()
+            score = self._do_move_and_search(state, move, depth - 1, alpha, beta)
 
             if self._time_up:
                 return 0
@@ -281,7 +255,6 @@ class AlphaBetaSearch:
                 best_move = move
 
             if score >= beta:
-                # Beta cutoff
                 self.move_ordering.update_killers(move, depth)
                 self.move_ordering.update_history(move, depth)
                 self.tt.store(key, depth, beta, BETA, move)

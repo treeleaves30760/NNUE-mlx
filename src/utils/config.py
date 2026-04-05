@@ -12,7 +12,7 @@ ALL_GAMES = [CHESS, MINICHESS, SHOGI, MINISHOGI]
 def create_game(game_name: str):
     """Factory function to create initial game state by name."""
     if game_name == CHESS:
-        from src.games.chess import initial_state
+        from src.games.chess_pc import initial_state
         return initial_state()
     elif game_name == MINICHESS:
         from src.games.minichess import initial_state
