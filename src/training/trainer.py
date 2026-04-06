@@ -10,7 +10,7 @@ from mlx.utils import tree_flatten
 
 from src.model.device import device_info
 from src.model.nnue import NNUEModel
-from src.training.dataset import load_batches
+from src.training.dataset import load_batches, load_batches_from_samples, preload_samples
 from src.training.loss import nnue_loss
 
 
@@ -116,6 +116,71 @@ class Trainer:
         avg_loss = (total_loss / max(num_batches, 1)).item()
         self.scheduler.step(avg_loss, self.optimizer)
         return avg_loss
+
+    def train_epoch_from_samples(self, samples, shuffle: bool = True) -> float:
+        """Train for one epoch on pre-loaded samples (with shuffling).
+
+        Args:
+            samples: List of (wf, bf, stm, score, result_float) tuples.
+            shuffle: Whether to shuffle samples each epoch.
+
+        Returns:
+            Average loss for the epoch.
+        """
+        self.model.train()
+        total_loss = mx.array(0.0)
+        num_batches = 0
+
+        for batch in load_batches_from_samples(
+            samples, self.batch_size, self.max_active, shuffle=shuffle
+        ):
+            loss = self._compiled_step(batch)
+            mx.eval(loss)
+            total_loss = total_loss + loss
+            num_batches += 1
+
+        avg_loss = (total_loss / max(num_batches, 1)).item()
+        self.scheduler.step(avg_loss, self.optimizer)
+        return avg_loss
+
+    def validate_epoch(self, samples) -> float:
+        """Compute validation loss without gradient updates."""
+        self.model.eval()
+        total_loss = mx.array(0.0)
+        num_batches = 0
+        for batch in load_batches_from_samples(
+            samples, self.batch_size, self.max_active, shuffle=False
+        ):
+            pred = self.model(
+                batch["white_features"], batch["black_features"],
+                batch["white_mask"], batch["black_mask"],
+                batch["side_to_move"],
+            )
+            loss = nnue_loss(pred, batch["score"], batch["result"], self.lambda_)
+            mx.eval(loss)
+            total_loss = total_loss + loss
+            num_batches += 1
+        return (total_loss / max(num_batches, 1)).item()
+
+    def load_weights_from_npz(self, npz_path: str):
+        """Load model weights from an exported .npz file (for warm-starting)."""
+        data = np.load(npz_path)
+        weights = [(k, mx.array(data[k])) for k in data.files]
+        self.model.load_weights(weights)
+        # Reset optimizer state for the new iteration
+        self.optimizer = optim.Adam(
+            learning_rate=float(self.optimizer.learning_rate.item()
+                                if hasattr(self.optimizer.learning_rate, 'item')
+                                else self.optimizer.learning_rate)
+        )
+        self.scheduler = ReduceLROnPlateau(
+            factor=0.3, patience=5, min_lr=1e-6
+        )
+        # Re-build compiled step with fresh optimizer state
+        self._state = [self.model.state, self.optimizer.state]
+        self._compiled_step = mx.compile(
+            self._train_step, inputs=self._state, outputs=self._state
+        )
 
     def save_checkpoint(self, filepath: str, epoch: int, loss: float):
         """Save training checkpoint."""

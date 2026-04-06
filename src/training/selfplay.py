@@ -2,6 +2,7 @@
 
 import atexit
 import io
+import multiprocessing
 import os
 import random
 import signal
@@ -325,6 +326,7 @@ class _managed_pool:
         self._pool = ProcessPoolExecutor(
             max_workers=self._max_workers,
             initializer=_worker_ignore_sigint,
+            mp_context=multiprocessing.get_context("spawn"),
         )
         # Install signal handlers so that SIGINT/SIGTERM clean up workers
         self._prev_sigint = signal.getsignal(signal.SIGINT)
@@ -438,8 +440,6 @@ def _worker_play_games_with_model(
     searcher = AlphaBetaSearch(
         evaluator, max_depth=search_depth, time_limit_ms=time_limit_ms,
     )
-    # Disable CSearch in worker processes to avoid fork+C-extension hangs
-    searcher._csearch = None
     engine = SelfPlayEngine(
         feature_set=fs,
         evaluator=searcher,

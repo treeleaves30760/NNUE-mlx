@@ -1,4 +1,4 @@
-.PHONY: sync test play train selfplay evaluate clean build-accel
+.PHONY: sync test play train selfplay evaluate clean build-accel pipeline monitor
 
 sync:
 	uv sync --extra dev
@@ -20,6 +20,12 @@ evaluate:
 
 build-accel:
 	uv run python setup.py build_ext --inplace
+
+pipeline:
+	PYTHONUNBUFFERED=1 uv run python scripts/pipeline.py --game $(GAME) --iterations $(ITERS)
+
+monitor:
+	uv run python scripts/monitor.py --game $(GAME)
 
 clean:
 	find . -type d -name __pycache__ -exec rm -rf {} +
