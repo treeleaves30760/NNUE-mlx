@@ -135,6 +135,114 @@ class NNUEEvaluator:
         return cls(accumulator, feature_set)
 
 
+class RuleBasedEvaluator:
+    """Material + piece-square table evaluator for testing NNUE strength."""
+
+    PIECE_VALUES = {1: 100, 2: 320, 3: 330, 4: 500, 5: 900}
+
+    # Piece-square tables from white's perspective (a1=index 0, h8=index 63)
+    _PAWN_PST = [
+         0,  0,  0,  0,  0,  0,  0,  0,
+        50, 50, 50, 50, 50, 50, 50, 50,
+        10, 10, 20, 30, 30, 20, 10, 10,
+         5,  5, 10, 25, 25, 10,  5,  5,
+         0,  0,  0, 20, 20,  0,  0,  0,
+         5, -5,-10,  0,  0,-10, -5,  5,
+         5, 10, 10,-20,-20, 10, 10,  5,
+         0,  0,  0,  0,  0,  0,  0,  0,
+    ]
+    _KNIGHT_PST = [
+       -50,-40,-30,-30,-30,-30,-40,-50,
+       -40,-20,  0,  0,  0,  0,-20,-40,
+       -30,  0, 10, 15, 15, 10,  0,-30,
+       -30,  5, 15, 20, 20, 15,  5,-30,
+       -30,  0, 15, 20, 20, 15,  0,-30,
+       -30,  5, 10, 15, 15, 10,  5,-30,
+       -40,-20,  0,  5,  5,  0,-20,-40,
+       -50,-40,-30,-30,-30,-30,-40,-50,
+    ]
+    _BISHOP_PST = [
+       -20,-10,-10,-10,-10,-10,-10,-20,
+       -10,  0,  0,  0,  0,  0,  0,-10,
+       -10,  0, 10, 10, 10, 10,  0,-10,
+       -10,  5,  5, 10, 10,  5,  5,-10,
+       -10,  0,  5, 10, 10,  5,  0,-10,
+       -10, 10,  5, 10, 10,  5, 10,-10,
+       -10,  5,  0,  0,  0,  0,  5,-10,
+       -20,-10,-10,-10,-10,-10,-10,-20,
+    ]
+    _ROOK_PST = [
+         0,  0,  0,  0,  0,  0,  0,  0,
+         5, 10, 10, 10, 10, 10, 10,  5,
+        -5,  0,  0,  0,  0,  0,  0, -5,
+        -5,  0,  0,  0,  0,  0,  0, -5,
+        -5,  0,  0,  0,  0,  0,  0, -5,
+        -5,  0,  0,  0,  0,  0,  0, -5,
+        -5,  0,  0,  0,  0,  0,  0, -5,
+         0,  0,  0,  5,  5,  0,  0,  0,
+    ]
+    _QUEEN_PST = [
+       -20,-10,-10, -5, -5,-10,-10,-20,
+       -10,  0,  0,  0,  0,  0,  0,-10,
+       -10,  0,  5,  5,  5,  5,  0,-10,
+        -5,  0,  5,  5,  5,  5,  0, -5,
+         0,  0,  5,  5,  5,  5,  0, -5,
+       -10,  5,  5,  5,  5,  5,  0,-10,
+       -10,  0,  5,  0,  0,  0,  0,-10,
+       -20,-10,-10, -5, -5,-10,-10,-20,
+    ]
+    _KING_PST = [
+       -30,-40,-40,-50,-50,-40,-40,-30,
+       -30,-40,-40,-50,-50,-40,-40,-30,
+       -30,-40,-40,-50,-50,-40,-40,-30,
+       -30,-40,-40,-50,-50,-40,-40,-30,
+       -20,-30,-30,-40,-40,-30,-30,-20,
+       -10,-20,-20,-20,-20,-20,-20,-10,
+        20, 20,  0,  0,  0,  0, 20, 20,
+        20, 30, 10,  0,  0, 10, 30, 20,
+    ]
+
+    _PST = {1: _PAWN_PST, 2: _KNIGHT_PST, 3: _BISHOP_PST,
+            4: _ROOK_PST, 5: _QUEEN_PST, 6: _KING_PST}
+
+    def evaluate(self, state: GameState) -> float:
+        board = state.board_array() if hasattr(state, "board_array") else None
+        if board is None:
+            return 0.0
+
+        score = 0.0
+        for sq in range(len(board)):
+            piece = board[sq]
+            if piece == 0:
+                continue
+            abs_piece = abs(piece)
+            value = self.PIECE_VALUES.get(abs_piece, 100)
+            pst = self._PST.get(abs_piece)
+            if piece > 0:
+                score += value
+                if pst:
+                    score += pst[sq]
+            else:
+                score -= value
+                if pst:
+                    # Mirror vertically for black
+                    mirror_sq = (7 - sq // 8) * 8 + (sq % 8)
+                    score -= pst[mirror_sq]
+
+        if state.side_to_move() == 1:
+            score = -score
+        return score
+
+    def set_position(self, state: GameState):
+        pass
+
+    def push_move(self, state_before, move, state_after):
+        pass
+
+    def pop_move(self):
+        pass
+
+
 class MaterialEvaluator:
     """Simple material-counting evaluator for bootstrapping (no NNUE needed)."""
 
