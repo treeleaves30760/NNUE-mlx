@@ -1,6 +1,6 @@
 """Transposition table for caching search results."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 from src.games.base import Move
@@ -20,21 +20,28 @@ class TTEntry:
     score: float    # Evaluation score
     flag: int       # EXACT, ALPHA, or BETA
     best_move: Optional[Move]  # Best move found
+    age: int = 0    # Search generation (for replacement policy)
 
 
 class TranspositionTable:
-    """Fixed-size hash table for caching search results."""
+    """Fixed-size hash table for caching search results.
+
+    Replacement policy: depth-preferred with age-based eviction.
+    Entries from stale search generations are replaced by any new entry.
+    Same-generation entries are replaced only by deeper or same-position entries.
+    """
 
     def __init__(self, size: int = 1 << 20):
-        """
-        Args:
-            size: Number of entries (should be power of 2). Default 1M entries.
-        """
         self.size = size
         self.mask = size - 1
         self.table = [None] * size
         self.hits = 0
         self.misses = 0
+        self._age = 0
+
+    def new_search(self):
+        """Bump the age counter at the start of each new search call."""
+        self._age = (self._age + 1) & 0xFF
 
     def probe(self, key: int) -> Optional[TTEntry]:
         """Look up a position in the table."""
@@ -48,12 +55,17 @@ class TranspositionTable:
 
     def store(self, key: int, depth: int, score: float,
               flag: int, best_move: Optional[Move]):
-        """Store a search result. Always-replace strategy."""
+        """Store a search result with depth-preferred + age replacement."""
         index = key & self.mask
-        self.table[index] = TTEntry(
-            key=key, depth=depth, score=score,
-            flag=flag, best_move=best_move,
-        )
+        existing = self.table[index]
+        if (existing is None
+                or existing.key == key
+                or depth >= existing.depth
+                or existing.age != self._age):
+            self.table[index] = TTEntry(
+                key=key, depth=depth, score=score,
+                flag=flag, best_move=best_move, age=self._age,
+            )
 
     def clear(self):
         """Clear all entries."""

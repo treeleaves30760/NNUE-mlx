@@ -491,6 +491,25 @@ class ChessState(GameState):
             king_sqs=(w_king, b_king),
         )
 
+    def make_null_move(self) -> "ChessState":
+        """Pass the turn without moving any piece (for null move pruning)."""
+        h = np.uint64(self._hash)
+        h ^= _side_zobrist
+        # Clear en-passant
+        if 0 <= self._ep_square < 64:
+            h ^= _ep_zobrist[_file(self._ep_square)]
+        return ChessState(
+            board=self.board,
+            side=1 - self._side,
+            castling=self._castling,
+            ep_square=-1,
+            halfmove=self._halfmove,
+            fullmove=self._fullmove,
+            zobrist=int(h),
+            history=self._history,
+            king_sqs=self._king_sqs,
+        )
+
     # ------------------------------------------------------------------
     # Utility / debug
     # ------------------------------------------------------------------

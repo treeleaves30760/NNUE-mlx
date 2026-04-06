@@ -758,6 +758,16 @@ class ShogiState(GameState):
         return ShogiState(new_board, sh, gh, new_side, new_history,
                           king_sqs=(w_king, b_king), hash_val=h)
 
+    def make_null_move(self) -> "ShogiState":
+        """Pass the turn without moving any piece (for null move pruning)."""
+        new_side = BLACK if self._side == WHITE else WHITE
+        h = self._hash
+        h ^= int(_Z_SIDE[self._side])
+        h ^= int(_Z_SIDE[new_side])
+        return ShogiState(self._board, self._sente_hand, self._gote_hand,
+                          new_side, self._history,
+                          king_sqs=self._king_sqs, hash_val=h)
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------

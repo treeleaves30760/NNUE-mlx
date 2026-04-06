@@ -147,6 +147,12 @@ class PythonChessState(GameState):
         new_board.push(pc_move)
         return PythonChessState(new_board)
 
+    def make_null_move(self) -> "PythonChessState":
+        """Pass the turn without moving any piece (for null move pruning)."""
+        new_board = self._board.copy()
+        new_board.push(chess.Move.null())
+        return PythonChessState(new_board)
+
     def make_move_inplace(self, move: Move):
         """Apply move in-place, return undo token (the chess.Move)."""
         pc_promo = None

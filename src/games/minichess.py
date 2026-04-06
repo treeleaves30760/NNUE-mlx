@@ -589,6 +589,14 @@ class MiniChessState(GameState):
         return MiniChessState(new_board, new_side, new_halfmoves,
                               hash_val=int(h), king_sqs=(w_king, b_king))
 
+    def make_null_move(self) -> "MiniChessState":
+        """Pass the turn without moving any piece (for null move pruning)."""
+        h = np.uint64(self._hash)
+        h ^= _ZOBRIST_SIDE
+        new_side = BLACK if self._side == WHITE else WHITE
+        return MiniChessState(self._board, new_side, self._halfmoves,
+                              hash_val=int(h), king_sqs=self._king_sqs)
+
     def is_terminal(self) -> bool:
         if self._terminal is not None:
             return self._terminal

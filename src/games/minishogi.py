@@ -869,6 +869,20 @@ class MiniShogiState(GameState):
             king_sqs=(w_king, b_king),
         )
 
+    def make_null_move(self) -> "MiniShogiState":
+        """Pass the turn without moving any piece (for null move pruning)."""
+        new_side = 1 - self._side
+        h = self._hash
+        h ^= _ZOBRIST_BLACK_TO_MOVE
+        return MiniShogiState(
+            board=self._board,
+            hands=self._hands,
+            side=new_side,
+            hash_val=h,
+            history=self._history,
+            king_sqs=self._king_sqs,
+        )
+
     # ------------------------------------------------------------------
     # Utility / display
     # ------------------------------------------------------------------
