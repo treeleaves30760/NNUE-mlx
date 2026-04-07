@@ -85,6 +85,19 @@ static inline void neon_clipped_relu_inplace(float *data, int n) {
     }
 }
 
+/* In-place SCReLU: clamp(x, 0, 1)^2 for n floats (n must be multiple of 4). */
+static inline void neon_screlu_inplace(float *data, int n) {
+    float32x4_t zero = vdupq_n_f32(0.0f);
+    float32x4_t one  = vdupq_n_f32(1.0f);
+    for (int i = 0; i < n; i += 4) {
+        float32x4_t v = vld1q_f32(data + i);
+        v = vmaxq_f32(v, zero);
+        v = vminq_f32(v, one);
+        v = vmulq_f32(v, v);  /* square */
+        vst1q_f32(data + i, v);
+    }
+}
+
 /* acc += weight_row, using NEON 16-wide unrolled loop.
  * n must be a multiple of 16. */
 static inline void neon_vec_add(float *acc, const float *row, int n) {
@@ -200,6 +213,15 @@ static inline void neon_clipped_relu_inplace(float *data, int n) {
     for (int i = 0; i < n; i++) {
         if (data[i] < 0.0f) data[i] = 0.0f;
         if (data[i] > 1.0f) data[i] = 1.0f;
+    }
+}
+
+static inline void neon_screlu_inplace(float *data, int n) {
+    for (int i = 0; i < n; i++) {
+        float v = data[i];
+        if (v < 0.0f) v = 0.0f;
+        if (v > 1.0f) v = 1.0f;
+        data[i] = v * v;
     }
 }
 
@@ -825,15 +847,15 @@ AccelAccum_evaluate(AccelAccumObject *self, PyObject *args)
         neon_clipped_relu_copy(input + acc_size, second, acc_size);
     }
 
-    /* 2. L1: y = ClippedReLU(W*x + b). */
+    /* 2. L1: y = SCReLU(W*x + b) = clamp(W*x + b, 0, 1)^2. */
     memcpy(l1_out, self->l1_bias, l1 * sizeof(float));
     sgemv(l1, acc_size * 2, 1.0f, self->l1_weight, acc_size * 2, input, 1.0f, l1_out);
-    neon_clipped_relu_inplace(l1_out, l1);
+    neon_screlu_inplace(l1_out, l1);
 
-    /* 3. L2: y = ClippedReLU(W*x + b). */
+    /* 3. L2: y = SCReLU(W*x + b). */
     memcpy(l2_out, self->l2_bias, l2 * sizeof(float));
     sgemv(l2, l1, 1.0f, self->l2_weight, l1, l1_out, 1.0f, l2_out);
-    neon_clipped_relu_inplace(l2_out, l2);
+    neon_screlu_inplace(l2_out, l2);
 
     /* 4. Output: dot product + bias. */
     float result = sdot(l2, self->out_weight, l2_out) + self->out_bias;
@@ -1484,11 +1506,11 @@ _accel_evaluate_direct(AccelAccumObject *acc, int side_to_move)
 
     memcpy(l1_out, acc->l1_bias, l1 * sizeof(float));
     sgemv(l1, acc_size * 2, 1.0f, acc->l1_weight, acc_size * 2, input, 1.0f, l1_out);
-    neon_clipped_relu_inplace(l1_out, l1);
+    neon_screlu_inplace(l1_out, l1);
 
     memcpy(l2_out, acc->l2_bias, l2 * sizeof(float));
     sgemv(l2, l1, 1.0f, acc->l2_weight, l1, l1_out, 1.0f, l2_out);
-    neon_clipped_relu_inplace(l2_out, l2);
+    neon_screlu_inplace(l2_out, l2);
 
     return sdot(l2, acc->out_weight, l2_out) + acc->out_bias;
 }
@@ -1527,6 +1549,31 @@ _accel_pop_direct(AccelAccumObject *acc)
         size_t offset = (size_t)acc->stack_top * 2 * acc_size;
         memcpy(acc->white_acc, acc->stack_buf + offset,            acc_size * sizeof(float));
         memcpy(acc->black_acc, acc->stack_buf + offset + acc_size, acc_size * sizeof(float));
+    }
+}
+
+/* Direct refresh for a single perspective (used by null move in C search) */
+static inline void
+_accel_refresh_perspective_direct(AccelAccumObject *acc, int perspective,
+                                   const int *indices, int count)
+{
+    int acc_size = acc->accumulator_size;
+    if (acc->use_int16) {
+        int16_t *a = (perspective == 0) ? acc->white_acc_q : acc->black_acc_q;
+        memcpy(a, acc->ft_bias_q, acc_size * sizeof(int16_t));
+        for (int i = 0; i < count; i++) {
+            int idx = indices[i];
+            if (idx >= 0 && idx < acc->num_features)
+                neon_vec_add_i16(a, acc->ft_weight_q + (size_t)idx * acc_size, acc_size);
+        }
+    } else {
+        float *a = (perspective == 0) ? acc->white_acc : acc->black_acc;
+        memcpy(a, acc->ft_bias, acc_size * sizeof(float));
+        for (int i = 0; i < count; i++) {
+            int idx = indices[i];
+            if (idx >= 0 && idx < acc->num_features)
+                neon_vec_add(a, acc->ft_weight + (size_t)idx * acc_size, acc_size);
+        }
     }
 }
 
@@ -1608,6 +1655,7 @@ typedef struct {
     PyObject *str_legal_moves;
     PyObject *str_make_move_inplace;
     PyObject *str_unmake_move;
+    PyObject *str_make_null_move;
     PyObject *str_is_terminal;
     PyObject *str_result;
     PyObject *str_side_to_move;
@@ -1620,6 +1668,28 @@ typedef struct {
     PyObject *Move_class;
 
 } CSearchObject;
+
+/* ---- LMR table ---------------------------------------------------------- */
+#define LMR_MAX_DEPTH 64
+#define LMR_MAX_MOVES 64
+static int lmr_table[LMR_MAX_DEPTH][LMR_MAX_MOVES];
+static int lmr_initialized = 0;
+
+static void init_lmr_table(void) {
+    if (lmr_initialized) return;
+    for (int d = 0; d < LMR_MAX_DEPTH; d++) {
+        for (int m = 0; m < LMR_MAX_MOVES; m++) {
+            if (d == 0 || m == 0) { lmr_table[d][m] = 0; continue; }
+            lmr_table[d][m] = (int)(1.0 + log((double)d) * log((double)m) / 2.0);
+            if (lmr_table[d][m] < 0) lmr_table[d][m] = 0;
+        }
+    }
+    lmr_initialized = 1;
+}
+
+/* Futility margins by depth */
+static const float FUTILITY_MARGINS[] = {0.0f, 200.0f, 500.0f};
+#define MAX_QDEPTH 8
 
 /* ======================================================================== */
 /* ---- TT helpers --------------------------------------------------------- */
@@ -1969,25 +2039,148 @@ csearch_score_moves(CSearchObject *self, PyObject *py_state,
 }
 
 /* ======================================================================== */
-/* ---- Core alpha-beta ---------------------------------------------------- */
+/* ---- Quiescence search -------------------------------------------------- */
 /* ======================================================================== */
 
-/* Forward declaration */
+static float csearch_quiescence(CSearchObject *self, PyObject *py_state,
+                                 float alpha, float beta, int qdepth);
+
+static float
+csearch_quiescence(CSearchObject *self, PyObject *py_state,
+                    float alpha, float beta, int qdepth)
+{
+    self->nodes_searched++;
+
+    if ((self->nodes_searched & 4095) == 0) {
+        double now = csearch_now_ms();
+        if (now - self->start_time >= (double)self->time_limit_ms)
+            self->time_up = 1;
+    }
+    if (self->time_up) return 0.0f;
+
+    /* Terminal check */
+    PyObject *py_terminal = PyObject_CallMethodNoArgs(py_state, self->str_is_terminal);
+    if (!py_terminal) return 0.0f;
+    int is_terminal = PyObject_IsTrue(py_terminal);
+    Py_DECREF(py_terminal);
+    if (is_terminal) {
+        PyObject *py_res = PyObject_CallMethodNoArgs(py_state, self->str_result);
+        if (!py_res) return 0.0f;
+        float score = (float)PyFloat_AsDouble(py_res) * CSEARCH_MATE_SCORE;
+        Py_DECREF(py_res);
+        return score;
+    }
+
+    /* Stand-pat: static eval as lower bound */
+    PyObject *py_stm = PyObject_CallMethodNoArgs(py_state, self->str_side_to_move);
+    if (!py_stm) return 0.0f;
+    int stm = (int)PyLong_AsLong(py_stm);
+    Py_DECREF(py_stm);
+    float stand_pat = _accel_evaluate_direct(self->accumulator, stm) * self->eval_scale;
+
+    if (stand_pat >= beta) return beta;
+    if (stand_pat > alpha) alpha = stand_pat;
+    if (qdepth >= MAX_QDEPTH) return alpha;
+
+    /* Generate legal moves, filter to captures and promotions */
+    PyObject *py_moves_list = PyObject_CallMethodNoArgs(py_state, self->str_legal_moves);
+    if (!py_moves_list) return alpha;
+
+    Py_ssize_t n_moves = PyList_Size(py_moves_list);
+    if (n_moves == 0) { Py_DECREF(py_moves_list); return alpha; }
+
+    /* Get board for capture detection */
+    PyObject *board_obj = PyObject_GetAttr(py_state, self->str_board_array);
+    const int8_t *board = NULL;
+    Py_buffer board_buf;
+    int has_buf = 0;
+    if (board_obj) {
+        if (PyObject_GetBuffer(board_obj, &board_buf, PyBUF_SIMPLE) == 0) {
+            board = (const int8_t *)board_buf.buf;
+            has_buf = 1;
+        }
+        Py_DECREF(board_obj);
+    }
+
+    int nm = (int)n_moves;
+    for (int i = 0; i < nm; i++) {
+        if (self->time_up) break;
+
+        PyObject *py_move = PyList_GET_ITEM(py_moves_list, i);  /* borrowed */
+
+        /* Filter: only captures and promotions */
+        PyObject *to_obj = PyObject_GetAttrString(py_move, "to_sq");
+        PyObject *promo_obj = PyObject_GetAttrString(py_move, "promotion");
+        int to_sq = to_obj ? (int)PyLong_AsLong(to_obj) : -1;
+        int has_promo = (promo_obj && promo_obj != Py_None);
+        Py_XDECREF(to_obj);
+        Py_XDECREF(promo_obj);
+
+        int is_capture = 0;
+        if (board && to_sq >= 0 && to_sq < self->max_sq) {
+            is_capture = (board[to_sq] != 0);
+        }
+        if (!is_capture && !has_promo) continue;
+
+        Py_INCREF(py_move);
+        PyObject *undo = csearch_make_move(self, py_state, py_move);
+        Py_DECREF(py_move);
+        if (!undo) { PyErr_Clear(); continue; }
+
+        float score = -csearch_quiescence(self, py_state, -beta, -alpha, qdepth + 1);
+
+        csearch_unmake_move(self, py_state, undo);
+        Py_DECREF(undo);
+
+        if (self->time_up) break;
+
+        if (score > alpha) {
+            alpha = score;
+            if (alpha >= beta) break;
+        }
+    }
+
+    if (has_buf) PyBuffer_Release(&board_buf);
+    Py_DECREF(py_moves_list);
+    return alpha;
+}
+
+/* ======================================================================== */
+/* ---- Core alpha-beta with all search enhancements ----------------------- */
+/* ======================================================================== */
+
+/* Forward declarations */
 static float csearch_alphabeta(CSearchObject *self, PyObject *py_state,
-                                int depth, float alpha, float beta, int ply);
+                                int depth, float alpha, float beta,
+                                int ply, int allow_null);
+
+/* Helper: check if side to move is in check */
+static int csearch_is_check(CSearchObject *self, PyObject *py_state) {
+    PyObject *py_check = PyObject_CallMethodNoArgs(py_state, self->str_is_check);
+    if (!py_check) { PyErr_Clear(); return 0; }
+    int result = PyObject_IsTrue(py_check);
+    Py_DECREF(py_check);
+    return result;
+}
+
+/* Helper: is this move a capture? (uses board array) */
+static int csearch_is_capture(const int8_t *board, int to_sq, int max_sq) {
+    if (!board || to_sq < 0 || to_sq >= max_sq) return 0;
+    return board[to_sq] != 0;
+}
 
 static float
 csearch_alphabeta(CSearchObject *self, PyObject *py_state,
-                  int depth, float alpha, float beta, int ply)
+                  int depth, float alpha, float beta,
+                  int ply, int allow_null)
 {
     self->nodes_searched++;
 
     /* Time check every 4096 nodes */
     if ((self->nodes_searched & 4095) == 0) {
         double now = csearch_now_ms();
-        if (now - self->start_time >= (double)self->time_limit_ms) {
+        if (now - self->start_time >= (double)self->time_limit_ms)
             self->time_up = 1;
-        }
     }
     if (self->time_up) return 0.0f;
 
@@ -1998,8 +2191,6 @@ csearch_alphabeta(CSearchObject *self, PyObject *py_state,
     Py_DECREF(py_terminal);
 
     if (is_terminal) {
-        /* Get result from Python: +1.0 = current player wins, -1.0 = loss, 0 = draw
-         * We expect side_to_move perspective from result(). */
         PyObject *py_res = PyObject_CallMethodNoArgs(py_state, self->str_result);
         if (!py_res) return 0.0f;
         float score = (float)PyFloat_AsDouble(py_res) * CSEARCH_MATE_SCORE;
@@ -2007,13 +2198,13 @@ csearch_alphabeta(CSearchObject *self, PyObject *py_state,
         return score;
     }
 
-    /* Leaf node: evaluate */
+    /* Check extension: search one ply deeper when in check */
+    int in_check = csearch_is_check(self, py_state);
+    if (in_check) depth += 1;
+
+    /* Leaf node: quiescence search */
     if (depth <= 0) {
-        PyObject *py_stm = PyObject_CallMethodNoArgs(py_state, self->str_side_to_move);
-        if (!py_stm) return 0.0f;
-        int stm = (int)PyLong_AsLong(py_stm);
-        Py_DECREF(py_stm);
-        return _accel_evaluate_direct(self->accumulator, stm) * self->eval_scale;
+        return csearch_quiescence(self, py_state, alpha, beta, 0);
     }
 
     /* TT probe */
@@ -2030,6 +2221,62 @@ csearch_alphabeta(CSearchObject *self, PyObject *py_state,
         if (tt_hit->flag == TT_BETA  && tt_hit->score >= beta)  return beta;
     }
 
+    /* Static eval for pruning decisions */
+    PyObject *py_stm = PyObject_CallMethodNoArgs(py_state, self->str_side_to_move);
+    if (!py_stm) return 0.0f;
+    int stm = (int)PyLong_AsLong(py_stm);
+    Py_DECREF(py_stm);
+    float static_eval = _accel_evaluate_direct(self->accumulator, stm) * self->eval_scale;
+
+    /* ---- Null Move Pruning ---- */
+    if (allow_null && depth > 2 && !in_check && static_eval >= beta) {
+        /* Try passing: if opponent can't beat beta even with a free move, prune */
+        int R = 2 + (depth > 6 ? 1 : 0);
+        PyObject *py_null = PyObject_CallMethodNoArgs(py_state, self->str_make_null_move);
+        if (py_null && py_null != Py_None) {
+            /* Null move: just push/pop accumulator, eval new state */
+            _accel_push_direct(self->accumulator);
+            /* Refresh accumulator for null-move state */
+            PyObject *fs = self->py_feature_set;
+            for (int persp = 0; persp < 2; persp++) {
+                PyObject *feats = PyObject_CallMethod(fs, "active_features", "Oi",
+                                                       py_null, persp);
+                if (feats) {
+                    int nf = 0;
+                    int feat_idx[64];
+                    Py_ssize_t flen = PyList_Size(feats);
+                    for (Py_ssize_t fi = 0; fi < flen && nf < 64; fi++) {
+                        feat_idx[nf++] = (int)PyLong_AsLong(PyList_GET_ITEM(feats, fi));
+                    }
+                    _accel_refresh_perspective_direct(self->accumulator, persp, feat_idx, nf);
+                    Py_DECREF(feats);
+                }
+            }
+
+            float null_score = -csearch_alphabeta(self, py_null,
+                                                   depth - 1 - R, -beta, -beta + 1,
+                                                   ply + 1, 0);
+            _accel_pop_direct(self->accumulator);
+            Py_DECREF(py_null);
+
+            if (!self->time_up && null_score >= beta) {
+                return beta;  /* Null move cutoff */
+            }
+        } else {
+            Py_XDECREF(py_null);
+            PyErr_Clear();
+        }
+    }
+
+    /* ---- Futility Pruning decision ---- */
+    int futility_ok = 0;
+    if (depth <= 2 && !in_check) {
+        float margin = FUTILITY_MARGINS[depth];
+        if (static_eval + margin <= alpha) {
+            futility_ok = 1;
+        }
+    }
+
     /* Generate legal moves */
     PyObject *py_moves_list = PyObject_CallMethodNoArgs(py_state, self->str_legal_moves);
     if (!py_moves_list) return 0.0f;
@@ -2037,25 +2284,37 @@ csearch_alphabeta(CSearchObject *self, PyObject *py_state,
     Py_ssize_t n_moves = PyList_Size(py_moves_list);
     if (n_moves == 0) {
         Py_DECREF(py_moves_list);
-        /* No moves and not terminal -- treat as draw */
         return 0.0f;
     }
 
-    /* Build C array of Python move objects (borrowed) */
+    /* Get board for capture detection */
+    PyObject *board_obj = PyObject_GetAttr(py_state, self->str_board_array);
+    const int8_t *board = NULL;
+    Py_buffer board_buf;
+    int has_buf = 0;
+    if (board_obj) {
+        if (PyObject_GetBuffer(board_obj, &board_buf, PyBUF_SIMPLE) == 0) {
+            board = (const int8_t *)board_buf.buf;
+            has_buf = 1;
+        }
+        Py_DECREF(board_obj);
+    }
+
     int nm = (int)n_moves;
     PyObject **py_moves_arr = (PyObject **)malloc((size_t)nm * sizeof(PyObject *));
     if (!py_moves_arr) {
+        if (has_buf) PyBuffer_Release(&board_buf);
         Py_DECREF(py_moves_list);
         PyErr_NoMemory();
         return 0.0f;
     }
     for (int i = 0; i < nm; i++)
-        py_moves_arr[i] = PyList_GET_ITEM(py_moves_list, i);  /* borrowed */
+        py_moves_arr[i] = PyList_GET_ITEM(py_moves_list, i);
 
-    /* Score and sort moves */
     CScoredMove *scored = (CScoredMove *)malloc((size_t)nm * sizeof(CScoredMove));
     if (!scored) {
         free(py_moves_arr);
+        if (has_buf) PyBuffer_Release(&board_buf);
         Py_DECREF(py_moves_list);
         PyErr_NoMemory();
         return 0.0f;
@@ -2070,24 +2329,54 @@ csearch_alphabeta(CSearchObject *self, PyObject *py_state,
     for (int i = 0; i < nm; i++) {
         if (self->time_up) break;
 
-        /* Re-build Python move object for this iteration */
-        PyObject *py_move = cmove_to_pyobj(self, &scored[i].move);
-        if (!py_move) {
-            /* Fallback: use original list item */
-            /* Find the matching list item by index -- scored is sorted so we
-               need to match by content. For robustness, just skip on error. */
-            PyErr_Clear();
+        CMove *mv = &scored[i].move;
+        int is_cap = csearch_is_capture(board, mv->to_sq, self->max_sq);
+        int is_promo = (mv->promotion >= 0);
+        int is_quiet = (!is_cap && !is_promo);
+
+        /* ---- Futility Pruning: skip quiet moves in futile positions ---- */
+        if (futility_ok && i > 0 && is_quiet) {
             continue;
         }
+
+        PyObject *py_move = cmove_to_pyobj(self, mv);
+        if (!py_move) { PyErr_Clear(); continue; }
 
         PyObject *undo = csearch_make_move(self, py_state, py_move);
         Py_DECREF(py_move);
-        if (!undo) {
-            PyErr_Clear();
-            continue;
-        }
+        if (!undo) { PyErr_Clear(); continue; }
 
-        float score = -csearch_alphabeta(self, py_state, depth - 1, -beta, -alpha, ply + 1);
+        float score;
+
+        if (i == 0) {
+            /* First move: full window (PV move) */
+            score = -csearch_alphabeta(self, py_state, depth - 1,
+                                        -beta, -alpha, ply + 1, 1);
+        } else {
+            /* ---- Late Move Reduction ---- */
+            int reduction = 0;
+            if (i >= 3 && depth >= 3 && !in_check && is_quiet) {
+                int di = depth < LMR_MAX_DEPTH ? depth : LMR_MAX_DEPTH - 1;
+                int mi = i < LMR_MAX_MOVES ? i : LMR_MAX_MOVES - 1;
+                reduction = lmr_table[di][mi];
+            }
+
+            /* PVS: zero-width search with possible LMR */
+            score = -csearch_alphabeta(self, py_state,
+                                        depth - 1 - reduction,
+                                        -alpha - 1, -alpha, ply + 1, 1);
+
+            /* Re-search at full depth if LMR reduced and score raises alpha */
+            if (!self->time_up && reduction > 0 && score > alpha) {
+                score = -csearch_alphabeta(self, py_state, depth - 1,
+                                            -alpha - 1, -alpha, ply + 1, 1);
+            }
+            /* Re-search with full window if score is in (alpha, beta) */
+            if (!self->time_up && score > alpha && score < beta) {
+                score = -csearch_alphabeta(self, py_state, depth - 1,
+                                            -beta, -alpha, ply + 1, 1);
+            }
+        }
 
         csearch_unmake_move(self, py_state, undo);
         Py_DECREF(undo);
@@ -2096,37 +2385,30 @@ csearch_alphabeta(CSearchObject *self, PyObject *py_state,
 
         if (score > best_score) {
             best_score = score;
-            best_move  = scored[i].move;
+            best_move  = *mv;
         }
         if (score > alpha) {
             alpha = score;
         }
         if (alpha >= beta) {
-            /* Beta cutoff: update killers and history */
-            if (ply >= 0 && ply < 128) {
-                CMove *km = &scored[i].move;
-                /* Only quiet moves as killers */
-                if (km->drop_piece < 0) {
-                    if (!(self->killers[ply][0].from_sq == km->from_sq &&
-                          self->killers[ply][0].to_sq   == km->to_sq)) {
-                        self->killers[ply][1] = self->killers[ply][0];
-                        self->killers[ply][0] = *km;
-                    }
+            /* Beta cutoff: update killers and history for quiet moves */
+            if (is_quiet && ply >= 0 && ply < 128) {
+                if (!(self->killers[ply][0].from_sq == mv->from_sq &&
+                      self->killers[ply][0].to_sq   == mv->to_sq)) {
+                    self->killers[ply][1] = self->killers[ply][0];
+                    self->killers[ply][0] = *mv;
                 }
             }
-            /* History update */
-            if (scored[i].move.from_sq >= 0 &&
-                scored[i].move.to_sq   >= 0 &&
-                scored[i].move.from_sq < self->max_sq &&
-                scored[i].move.to_sq   < self->max_sq) {
-                self->history[scored[i].move.from_sq * self->max_sq
-                              + scored[i].move.to_sq] += depth * depth;
+            if (mv->from_sq >= 0 && mv->to_sq >= 0 &&
+                mv->from_sq < self->max_sq && mv->to_sq < self->max_sq) {
+                self->history[mv->from_sq * self->max_sq + mv->to_sq] += depth * depth;
             }
             break;
         }
     }
 
     free(scored);
+    if (has_buf) PyBuffer_Release(&board_buf);
     Py_DECREF(py_moves_list);
 
     if (!self->time_up) {
@@ -2142,21 +2424,21 @@ csearch_alphabeta(CSearchObject *self, PyObject *py_state,
 
 /*
  * csearch_search_root
- * Iterative deepening root. Returns best score, writes best move to *out_best.
+ * Iterative deepening with aspiration windows.
+ * Returns best score, writes best move to *out_best.
  */
 static float
 csearch_search_root(CSearchObject *self, PyObject *py_state,
                     int max_depth, CMove *out_best)
 {
+    init_lmr_table();
     *out_best = cmove_null();
     float best_score = -CSEARCH_INF;
 
     for (int depth = 1; depth <= max_depth; depth++) {
         if (self->time_up) break;
 
-        /* Reset per-search state (keep TT, killers, history across iterations) */
-        /* Clear killers for this depth iteration */
-        memset(self->killers, 0xFF, sizeof(self->killers)); /* -1 everywhere */
+        memset(self->killers, 0xFF, sizeof(self->killers));
 
         PyObject *py_moves_list = PyObject_CallMethodNoArgs(py_state, self->str_legal_moves);
         if (!py_moves_list) break;
@@ -2170,7 +2452,6 @@ csearch_search_root(CSearchObject *self, PyObject *py_state,
         for (int i = 0; i < nm; i++)
             py_moves_arr[i] = PyList_GET_ITEM(py_moves_list, i);
 
-        /* Probe TT for the root position */
         PyObject *py_hash = PyObject_CallMethodNoArgs(py_state, self->str_zobrist_hash);
         uint64_t root_key = 0;
         if (py_hash) {
@@ -2185,10 +2466,23 @@ csearch_search_root(CSearchObject *self, PyObject *py_state,
         csearch_score_moves(self, py_state, scored, py_moves_arr, nm, 0, tt_root);
         free(py_moves_arr);
 
+        /* Aspiration window: narrow search around previous best */
+        float asp_delta = 25.0f;
+        float alpha, beta;
+        if (depth >= 4 && best_score > -CSEARCH_MATE_SCORE + 1000) {
+            alpha = best_score - asp_delta;
+            beta  = best_score + asp_delta;
+        } else {
+            alpha = -CSEARCH_INF;
+            beta  =  CSEARCH_INF;
+        }
+
+        int asp_retries = 0;
+asp_retry:;
+
         float iter_best = -CSEARCH_INF;
         CMove iter_move = cmove_null();
-        float alpha = -CSEARCH_INF;
-        float beta  =  CSEARCH_INF;
+        float local_alpha = alpha;
 
         for (int i = 0; i < nm; i++) {
             if (self->time_up) break;
@@ -2200,7 +2494,19 @@ csearch_search_root(CSearchObject *self, PyObject *py_state,
             Py_DECREF(py_move);
             if (!undo) { PyErr_Clear(); continue; }
 
-            float score = -csearch_alphabeta(self, py_state, depth - 1, -beta, -alpha, 1);
+            float score;
+            if (i == 0) {
+                score = -csearch_alphabeta(self, py_state, depth - 1,
+                                            -beta, -local_alpha, 1, 1);
+            } else {
+                /* PVS: zero-width then re-search */
+                score = -csearch_alphabeta(self, py_state, depth - 1,
+                                            -local_alpha - 1, -local_alpha, 1, 1);
+                if (!self->time_up && score > local_alpha && score < beta) {
+                    score = -csearch_alphabeta(self, py_state, depth - 1,
+                                                -beta, -local_alpha, 1, 1);
+                }
+            }
 
             csearch_unmake_move(self, py_state, undo);
             Py_DECREF(undo);
@@ -2210,7 +2516,20 @@ csearch_search_root(CSearchObject *self, PyObject *py_state,
             if (score > iter_best) {
                 iter_best = score;
                 iter_move = scored[i].move;
-                if (score > alpha) alpha = score;
+                if (score > local_alpha) local_alpha = score;
+            }
+        }
+
+        /* Aspiration window fail: widen and retry */
+        if (!self->time_up && asp_retries < 2) {
+            if (iter_best <= alpha || iter_best >= beta) {
+                asp_delta *= 4;
+                alpha = best_score - asp_delta;
+                beta  = best_score + asp_delta;
+                if (alpha < -CSEARCH_INF + 1000) alpha = -CSEARCH_INF;
+                if (beta  >  CSEARCH_INF - 1000) beta  =  CSEARCH_INF;
+                asp_retries++;
+                goto asp_retry;
             }
         }
 
@@ -2220,7 +2539,6 @@ csearch_search_root(CSearchObject *self, PyObject *py_state,
         if (!self->time_up && !cmove_is_null(&iter_move)) {
             best_score = iter_best;
             *out_best  = iter_move;
-            /* Store root result in TT */
             csearch_tt_store(self, root_key, depth, best_score, TT_EXACT, out_best);
         }
     }
@@ -2241,6 +2559,7 @@ CSearch_dealloc(CSearchObject *self)
     Py_XDECREF(self->str_make_move_inplace);
     Py_XDECREF(self->str_unmake_move);
     Py_XDECREF(self->str_is_terminal);
+    Py_XDECREF(self->str_make_null_move);
     Py_XDECREF(self->str_result);
     Py_XDECREF(self->str_side_to_move);
     Py_XDECREF(self->str_zobrist_hash);
@@ -2329,6 +2648,7 @@ CSearch_init(CSearchObject *self, PyObject *args, PyObject *kwds)
     INTERN(str_result,             "result")
     INTERN(str_side_to_move,       "side_to_move")
     INTERN(str_zobrist_hash,       "zobrist_hash")
+    INTERN(str_make_null_move,     "make_null_move")
     INTERN(str_is_check,           "is_check")
     INTERN(str_board_array,        "board_array")
     INTERN(str_active_features,    "active_features")
@@ -2511,7 +2831,7 @@ CSearch_search_top_n(CSearchObject *self, PyObject *args)
         if (!undo) { PyErr_Clear(); continue; }
 
         float score = -csearch_alphabeta(self, py_state, max_depth - 1,
-                                         -CSEARCH_INF, CSEARCH_INF, 1);
+                                         -CSEARCH_INF, CSEARCH_INF, 1, 1);
         csearch_unmake_move(self, py_state, undo);
         Py_DECREF(undo);
 
