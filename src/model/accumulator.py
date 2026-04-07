@@ -110,7 +110,7 @@ class IncrementalAccumulator:
         Returns:
             Evaluation score (positive = good for side to move).
         """
-        # ClippedReLU on accumulators
+        # ClippedReLU on accumulators (feature transformer)
         w = np.clip(self.white_acc, 0.0, 1.0)
         b = np.clip(self.black_acc, 0.0, 1.0)
 
@@ -120,10 +120,12 @@ class IncrementalAccumulator:
         else:
             x = np.concatenate([b, w])
 
-        # L1
+        # L1 with SCReLU: clamp(x, 0, 1)^2
         x = np.clip(self.l1_weight @ x + self.l1_bias, 0.0, 1.0)
-        # L2
+        x = x * x
+        # L2 with SCReLU
         x = np.clip(self.l2_weight @ x + self.l2_bias, 0.0, 1.0)
+        x = x * x
         # Output
         return float(self.out_weight @ x + self.out_bias)
 

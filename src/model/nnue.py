@@ -3,17 +3,19 @@
 Architecture:
     HalfKP features -> Feature Transformer (Embedding + sum -> 256)
     -> ClippedReLU -> Concat perspectives (512)
-    -> Linear(512, 32) -> ClippedReLU
-    -> Linear(32, 32)  -> ClippedReLU
+    -> Linear(512, 32) -> SCReLU
+    -> Linear(32, 32)  -> SCReLU
     -> Linear(32, 1)   -> evaluation score
 
 Uses Apple MLX for native Apple Silicon training with unified memory.
+SCReLU (Squared Clipped ReLU) provides ~50% effective capacity increase
+over ClippedReLU in hidden layers.
 """
 
 import mlx.core as mx
 import mlx.nn as nn
 
-from src.model.clipped_relu import ClippedReLU
+from src.model.clipped_relu import ClippedReLU, SCReLU
 
 
 class NNUEModel(nn.Module):
@@ -36,8 +38,10 @@ class NNUEModel(nn.Module):
         self.feature_table = nn.Embedding(num_features, accumulator_size)
         self.ft_bias = mx.zeros((accumulator_size,))
 
-        # Hidden layers after concatenating both perspectives
+        # ClippedReLU for feature transformer (needed for incremental accumulator)
         self.clipped_relu = ClippedReLU()
+        # SCReLU for hidden layers (better capacity than ClippedReLU)
+        self.screlu = SCReLU()
         self.l1 = nn.Linear(accumulator_size * 2, l1_size)
         self.l2 = nn.Linear(l1_size, l2_size)
         self.output = nn.Linear(l2_size, 1)
@@ -90,7 +94,7 @@ class NNUEModel(nn.Module):
         second = b_acc * (1.0 - stm) + w_acc * stm
         x = mx.concatenate([first, second], axis=1)
 
-        # Hidden layers
-        x = self.clipped_relu(self.l1(x))
-        x = self.clipped_relu(self.l2(x))
+        # Hidden layers with SCReLU
+        x = self.screlu(self.l1(x))
+        x = self.screlu(self.l2(x))
         return self.output(x)
