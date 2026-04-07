@@ -1,6 +1,7 @@
 """NNUE training loss function.
 
 Blends evaluation accuracy with game-result prediction using sigmoid scaling.
+Uses power-of-2.6 loss (empirically better gradient distribution than MSE).
 """
 
 import mlx.core as mx
@@ -11,14 +12,21 @@ import mlx.core as mx
 EVAL_SCALE = 410.0
 OUTPUT_SCALE = 32.0  # Model output × OUTPUT_SCALE → centipawn-like range
 
+# Exponent for loss function. 2.6 gives better gradient distribution than
+# plain MSE (2.0), empirically validated by Stockfish NNUE research.
+LOSS_EXPONENT = 2.6
+
 
 def nnue_loss(predicted: mx.array, score: mx.array,
-              result: mx.array, lambda_: float = 0.5) -> mx.array:
+              result: mx.array, lambda_: float = 1.0) -> mx.array:
     """Blended loss between search score fitting and game result fitting.
 
     Both the model output and search score are passed through sigmoid to
     map into [0, 1] win-probability space. Model output is scaled up by
     OUTPUT_SCALE to compensate for the small magnitude of NNUE outputs.
+
+    Uses |p - target|^2.6 instead of squared error for better gradient
+    distribution on large-error samples.
 
     Args:
         predicted: Model output, shape (batch, 1).
@@ -32,4 +40,4 @@ def nnue_loss(predicted: mx.array, score: mx.array,
     p = mx.sigmoid(mx.squeeze(predicted, axis=-1) * OUTPUT_SCALE / EVAL_SCALE)
     t_eval = mx.sigmoid(score / EVAL_SCALE)
     target = lambda_ * t_eval + (1.0 - lambda_) * result
-    return mx.mean((p - target) ** 2)
+    return mx.mean(mx.abs(p - target) ** LOSS_EXPONENT)

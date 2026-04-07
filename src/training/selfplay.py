@@ -113,7 +113,8 @@ class SelfPlayEngine:
                  search_depth: int = 4, random_play_prob: float = 0.1,
                  game_name: Optional[str] = None,
                  model_path: Optional[str] = None,
-                 time_limit_ms: int = 2000):
+                 time_limit_ms: int = 2000,
+                 use_rule_eval: bool = False):
         """
         Args:
             feature_set: Feature extractor for the game.
@@ -124,6 +125,7 @@ class SelfPlayEngine:
             game_name: Game variant name (for parallel worker model loading).
             model_path: Path to .npz model (for parallel worker model loading).
             time_limit_ms: Time limit per move for NNUE search.
+            use_rule_eval: Use RuleBasedEvaluator (for parallel bootstrap).
         """
         self.feature_set = feature_set
         self.evaluator = evaluator
@@ -132,10 +134,19 @@ class SelfPlayEngine:
         self.game_name = game_name
         self.model_path = model_path
         self.time_limit_ms = time_limit_ms
+        self.use_rule_eval = use_rule_eval
+
+    # Quiet position filter thresholds
+    SCORE_CLIP = 10000   # Skip positions with |score| > this (won/lost)
+    SKIP_CHECK = True    # Skip positions where side to move is in check
 
     def play_game(self, initial_state: GameState,
                   max_moves: int = 512) -> List[Tuple]:
         """Play one self-play game, collecting training positions.
+
+        Applies quiet position filtering:
+        - Skip positions where the side to move is in check
+        - Skip positions with extreme evaluations (|score| > 10000)
 
         Returns:
             List of (white_features, black_features, side_to_move, score, result)
@@ -148,25 +159,30 @@ class SelfPlayEngine:
             if state.is_terminal():
                 break
 
-            # Extract features
-            wf = self.feature_set.active_features(state, 0)
-            bf = self.feature_set.active_features(state, 1)
-            stm = state.side_to_move()
-
-            # Get evaluation score
+            # Get evaluation score and pick move
             moves = state.legal_moves()
             if not moves:
                 break
 
             if self.evaluator and random.random() > self.random_play_prob:
-                # Use evaluator to pick move and get score
                 best_move, score = self.evaluator.search(state, self.search_depth)
             else:
-                # Random move, score = 0
                 best_move = random.choice(moves)
                 score = 0
 
-            positions.append((wf, bf, stm, score))
+            # Quiet position filtering: only collect "quiet" positions
+            is_quiet = True
+            if self.SKIP_CHECK and state.is_check():
+                is_quiet = False
+            if abs(score) > self.SCORE_CLIP:
+                is_quiet = False
+
+            if is_quiet:
+                wf = self.feature_set.active_features(state, 0)
+                bf = self.feature_set.active_features(state, 1)
+                stm = state.side_to_move()
+                positions.append((wf, bf, stm, score))
+
             state = state.make_move(best_move)
 
         # Determine game result
@@ -222,6 +238,11 @@ class SelfPlayEngine:
             workers = num_workers or min(os.cpu_count() or 4, 8)
             self._generate_parallel_with_model(
                 output_path, num_games, max_moves, workers)
+        elif self.use_rule_eval and self.game_name:
+            # Parallel bootstrap with RuleBasedEvaluator
+            workers = num_workers or min(os.cpu_count() or 4, 8)
+            self._generate_parallel_rule_eval(
+                output_path, num_games, max_moves, workers)
         elif self.evaluator is not None:
             # Has in-process evaluator but no model_path for workers
             self._generate_single(initial_state_fn, output_path,
@@ -262,6 +283,32 @@ class SelfPlayEngine:
                     pool.submit(
                         _worker_play_games,
                         self.game_name or "chess",
+                        n, max_moves, self.random_play_prob,
+                    )
+                    for n in chunks
+                ]
+                for i, future in enumerate(futures):
+                    data = future.result()
+                    f.write(data)
+                    print(f"Chunk {i + 1}/{len(chunks)} done")
+
+        print(f"Generated data from {num_games} games")
+        print(f"Saved to {output_path}")
+
+    def _generate_parallel_rule_eval(self, output_path: str,
+                                       num_games: int, max_moves: int,
+                                       workers: int):
+        """Multi-process generation with RuleBasedEvaluator (bootstrap)."""
+        print(f"Using {workers} worker processes (Rule-Based AI)")
+        chunks = _split_work(num_games, workers)
+
+        with open(output_path, "wb") as f:
+            with _managed_pool(workers) as pool:
+                futures = [
+                    pool.submit(
+                        _worker_play_games_rule_eval,
+                        self.game_name,
+                        self.search_depth, self.time_limit_ms,
                         n, max_moves, self.random_play_prob,
                     )
                     for n in chunks
@@ -405,6 +452,38 @@ def _worker_play_games(
     engine = SelfPlayEngine(
         feature_set=fs,
         evaluator=None,
+        random_play_prob=random_play_prob,
+    )
+    buf = io.BytesIO()
+    for _ in range(num_games):
+        state = _create_game(game_name)
+        positions = engine.play_game(state, max_moves)
+        for wf, bf, stm, score, result in positions:
+            write_sample(buf, wf, bf, stm, score, result)
+    return buf.getvalue()
+
+
+def _worker_play_games_rule_eval(
+    game_name: str,
+    search_depth: int,
+    time_limit_ms: int,
+    num_games: int,
+    max_moves: int,
+    random_play_prob: float,
+) -> bytes:
+    """Worker function with RuleBasedEvaluator for bootstrap. Returns bytes."""
+    from src.search.evaluator import RuleBasedEvaluator
+    from src.search.alphabeta import AlphaBetaSearch
+
+    fs = _create_feature_set(game_name)
+    rule_eval = RuleBasedEvaluator()
+    searcher = AlphaBetaSearch(
+        rule_eval, max_depth=search_depth, time_limit_ms=time_limit_ms,
+    )
+    engine = SelfPlayEngine(
+        feature_set=fs,
+        evaluator=searcher,
+        search_depth=search_depth,
         random_play_prob=random_play_prob,
     )
     buf = io.BytesIO()

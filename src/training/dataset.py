@@ -1,6 +1,9 @@
-"""Data loading for MLX NNUE training."""
+"""Data loading for MLX NNUE training.
 
-import random
+Optimized for Apple Silicon: pre-pads into contiguous numpy arrays during
+loading so that batching is pure array slicing (no Python per-sample loops).
+"""
+
 import struct
 import threading
 import queue
@@ -12,49 +15,52 @@ from typing import Dict, Iterator, List, Tuple
 from src.training.data_format import read_sample
 
 
-def preload_samples(filepaths: List[str]) -> List[Tuple]:
-    """Fast preload of all samples from multiple .bin files into memory.
+def preload_samples(filepaths: List[str],
+                    max_active: int = 32) -> Dict[str, np.ndarray]:
+    """Fast preload of all samples from .bin files into padded numpy arrays.
 
-    Uses memoryview + struct.unpack_from for ~5-10x faster parsing than
-    per-read file I/O.  Returns list of (wf, bf, stm, score, result_float).
+    Returns a dict of numpy arrays ready for batch slicing:
+        white_features: (N, max_active) int32
+        black_features: (N, max_active) int32
+        white_mask:     (N, max_active) float32
+        black_mask:     (N, max_active) float32
+        score:          (N,) float32
+        result:         (N,) float32
+        side_to_move:   (N,) int32
     """
-    all_samples: List[Tuple] = []
     if isinstance(filepaths, str):
         filepaths = [filepaths]
 
+    # First pass: collect raw tuples (variable-length features)
+    raw: List[Tuple] = []
     for fp in filepaths:
         data = Path(fp).read_bytes()
         n = len(data)
         offset = 0
 
         while offset < n:
-            # num_white_features: uint16
             if offset + 2 > n:
                 break
             nw = struct.unpack_from("<H", data, offset)[0]
             offset += 2
 
-            # white_feature_indices: uint32[nw]
             wf_end = offset + nw * 4
             if wf_end > n:
                 break
-            wf = list(struct.unpack_from(f"<{nw}I", data, offset))
+            wf = struct.unpack_from(f"<{nw}I", data, offset)
             offset = wf_end
 
-            # num_black_features: uint16
             if offset + 2 > n:
                 break
             nb = struct.unpack_from("<H", data, offset)[0]
             offset += 2
 
-            # black_feature_indices: uint32[nb]
             bf_end = offset + nb * 4
             if bf_end > n:
                 break
-            bf = list(struct.unpack_from(f"<{nb}I", data, offset))
+            bf = struct.unpack_from(f"<{nb}I", data, offset)
             offset = bf_end
 
-            # side_to_move(uint8) + score(int16) + result(int8)
             if offset + 4 > n:
                 break
             stm = data[offset]
@@ -62,26 +68,106 @@ def preload_samples(filepaths: List[str]) -> List[Tuple]:
             result = struct.unpack_from("<b", data, offset + 3)[0]
             offset += 4
 
-            result_float = (result + 1.0) / 2.0
-            all_samples.append((wf, bf, stm, float(score), result_float))
+            raw.append((wf, bf, stm, float(score), (result + 1.0) / 2.0))
 
-    return all_samples
+    # Second pass: pack into contiguous padded numpy arrays
+    total = len(raw)
+    wf_arr = np.zeros((total, max_active), dtype=np.int32)
+    bf_arr = np.zeros((total, max_active), dtype=np.int32)
+    wm_arr = np.zeros((total, max_active), dtype=np.float32)
+    bm_arr = np.zeros((total, max_active), dtype=np.float32)
+    score_arr = np.empty(total, dtype=np.float32)
+    result_arr = np.empty(total, dtype=np.float32)
+    stm_arr = np.empty(total, dtype=np.int32)
+
+    for i, (wf, bf, stm, score, result) in enumerate(raw):
+        wlen = min(len(wf), max_active)
+        wf_arr[i, :wlen] = wf[:wlen]
+        wm_arr[i, :wlen] = 1.0
+        blen = min(len(bf), max_active)
+        bf_arr[i, :blen] = bf[:blen]
+        bm_arr[i, :blen] = 1.0
+        score_arr[i] = score
+        result_arr[i] = result
+        stm_arr[i] = stm
+
+    return {
+        "white_features": wf_arr,
+        "black_features": bf_arr,
+        "white_mask": wm_arr,
+        "black_mask": bm_arr,
+        "score": score_arr,
+        "result": result_arr,
+        "side_to_move": stm_arr,
+    }
 
 
 def load_batches_from_samples(
-    samples: List[Tuple],
-    batch_size: int = 2048,
+    samples,
+    batch_size: int = 16384,
     max_active: int = 32,
     shuffle: bool = True,
     prefetch: int = 8,
 ) -> Iterator[Dict[str, mx.array]]:
-    """Yield batches from pre-loaded samples with optional shuffling.
+    """Yield batches from pre-loaded numpy arrays with optional shuffling.
+
+    Accepts either:
+    - Dict of numpy arrays (from preload_samples) -> fast array slicing
+    - List of tuples (legacy) -> falls back to per-sample collation
 
     Uses threaded prefetch for CPU/GPU overlap.
     """
+    if isinstance(samples, dict):
+        yield from _batches_from_arrays(samples, batch_size, shuffle, prefetch)
+    else:
+        yield from _batches_from_tuples(samples, batch_size, max_active,
+                                         shuffle, prefetch)
+
+
+def _batches_from_arrays(
+    arrays: Dict[str, np.ndarray],
+    batch_size: int,
+    shuffle: bool,
+    prefetch: int,
+) -> Iterator[Dict[str, mx.array]]:
+    """Fast path: batch via numpy fancy indexing, no per-sample Python loop."""
+    n = len(arrays["score"])
+    indices = np.arange(n, dtype=np.int64)
     if shuffle:
-        indices = list(range(len(samples)))
-        random.shuffle(indices)
+        np.random.shuffle(indices)  # In-place, no copy
+
+    q: queue.Queue = queue.Queue(maxsize=prefetch)
+
+    def _producer():
+        for start in range(0, n, batch_size):
+            idx = indices[start:start + batch_size]
+            batch = {k: mx.array(v[idx]) for k, v in arrays.items()}
+            q.put(batch)
+        q.put(None)
+
+    t = threading.Thread(target=_producer, daemon=True)
+    t.start()
+
+    while True:
+        batch = q.get()
+        if batch is None:
+            break
+        yield batch
+
+    t.join()
+
+
+def _batches_from_tuples(
+    samples: List[Tuple],
+    batch_size: int,
+    max_active: int,
+    shuffle: bool,
+    prefetch: int,
+) -> Iterator[Dict[str, mx.array]]:
+    """Legacy fallback for tuple-based samples."""
+    if shuffle:
+        indices = np.arange(len(samples), dtype=np.int64)
+        np.random.shuffle(indices)
         samples_ordered = [samples[i] for i in indices]
     else:
         samples_ordered = samples
@@ -107,7 +193,7 @@ def load_batches_from_samples(
     t.join()
 
 
-def load_batches(filepath: str, batch_size: int = 2048,
+def load_batches(filepath: str, batch_size: int = 16384,
                  max_active: int = 32,
                  prefetch: int = 8) -> Iterator[Dict[str, mx.array]]:
     """Yield batches of training data as MLX arrays with threaded prefetch.
@@ -115,12 +201,6 @@ def load_batches(filepath: str, batch_size: int = 2048,
     A background thread reads and collates batches while the main thread
     runs GPU computation. Since MLX releases the GIL during Metal compute,
     this gives genuine CPU/GPU overlap.
-
-    Args:
-        filepath: Path to .bin training data file.
-        batch_size: Samples per batch.
-        max_active: Maximum active features per perspective (for padding).
-        prefetch: Number of batches to buffer ahead.
     """
     q: queue.Queue = queue.Queue(maxsize=prefetch)
 
