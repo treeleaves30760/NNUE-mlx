@@ -79,61 +79,75 @@ FEATURE_SETS = {
 # Default configuration per game
 GAME_DEFAULTS = {
     "minichess": {
-        "bootstrap_games": 20000,
-        "games_per_iter": 2000,
-        "epochs_bootstrap": 30,
-        "epochs_per_iter": 20,
+        "bootstrap_games": 10000,
+        "bootstrap_depth": 3,
+        "games_per_iter": 3000,
+        "epochs_bootstrap": 100,
+        "epochs_per_iter": 150,
+        "early_stop_patience": 15,
         "eval_games": 30,
-        "max_depth_schedule": [2, 3, 3, 4, 4, 4],
-        "time_limit_schedule": [500, 500, 1000, 1000, 1500, 2000],
+        "eval_depth": 6,
+        "eval_time_limit_ms": 3000,
+        "max_depth_schedule": [3, 4, 4, 5, 5, 6],
+        "time_limit_schedule": [500, 1000, 1000, 1500, 2000, 3000],
         "workers": 0,
-        "batch_size": 2048,
-        "lr": 1e-3,
-        "lambda_": 0.5,
+        "batch_size": 16384,
+        "lr": 8.75e-4,
+        "lambda_": 1.0,
+        "lambda_end": 0.75,
+        "lr_gamma": 0.992,
         "data_window": 3,
     },
     "chess": {
-        "bootstrap_games": 10000,
-        "games_per_iter": 200,
-        "epochs_bootstrap": 40,
-        "epochs_per_iter": 30,
-        "eval_games": 3,
-        "eval_depth": 10,
-        "eval_time_limit_ms": 30000,
-        "max_depth_schedule": [3, 3, 4, 4, 5, 5, 6, 6],
-        "time_limit_schedule": [2000, 2000, 3000, 3000, 5000, 5000, 8000, 10000],
+        "bootstrap_games": 2000,
+        "bootstrap_depth": 2,
+        "games_per_iter": 500,
+        "epochs_bootstrap": 100,
+        "epochs_per_iter": 200,
+        "early_stop_patience": 15,
+        "eval_games": 10,
+        "eval_depth": 5,
+        "eval_time_limit_ms": 3000,
+        "max_depth_schedule": [3, 3, 4, 4, 4, 5, 5, 5, 6, 6],
+        "time_limit_schedule": [1000, 1000, 1500, 1500, 2000, 2000, 3000, 3000, 5000, 5000],
         "workers": 8,
-        "batch_size": 2048,
-        "lr": 1e-3,
-        "lambda_": 0.5,
+        "batch_size": 16384,
+        "lr": 8.75e-4,
+        "lambda_": 1.0,
+        "lambda_end": 0.75,
+        "lr_gamma": 0.992,
         "data_window": 5,
     },
     "shogi": {
-        "bootstrap_games": 10000,
-        "games_per_iter": 300,
-        "epochs_bootstrap": 30,
-        "epochs_per_iter": 20,
-        "eval_games": 10,
-        "max_depth_schedule": [2, 2, 3, 3, 4],
-        "time_limit_schedule": [500, 500, 1000, 1500, 2000],
+        "bootstrap_games": 20000,
+        "games_per_iter": 2000,
+        "epochs_bootstrap": 200,
+        "epochs_per_iter": 150,
+        "eval_games": 30,
+        "max_depth_schedule": [3, 3, 4, 4, 5, 5],
+        "time_limit_schedule": [1000, 1000, 1500, 2000, 3000, 5000],
         "workers": 0,
-        "batch_size": 2048,
-        "lr": 1e-3,
-        "lambda_": 0.5,
+        "batch_size": 16384,
+        "lr": 8.75e-4,
+        "lambda_": 1.0,
+        "lambda_end": 0.75,
+        "lr_gamma": 0.992,
         "data_window": 3,
     },
     "minishogi": {
-        "bootstrap_games": 15000,
-        "games_per_iter": 1500,
-        "epochs_bootstrap": 30,
-        "epochs_per_iter": 20,
-        "eval_games": 20,
-        "max_depth_schedule": [2, 3, 3, 4, 4],
-        "time_limit_schedule": [500, 500, 1000, 1000, 1500],
+        "bootstrap_games": 30000,
+        "games_per_iter": 3000,
+        "epochs_bootstrap": 200,
+        "epochs_per_iter": 150,
+        "eval_games": 50,
+        "max_depth_schedule": [3, 4, 4, 5, 5, 6],
+        "time_limit_schedule": [500, 1000, 1000, 1500, 2000, 3000],
         "workers": 0,
-        "batch_size": 2048,
-        "lr": 1e-3,
-        "lambda_": 0.5,
+        "batch_size": 16384,
+        "lr": 8.75e-4,
+        "lambda_": 1.0,
+        "lambda_end": 0.75,
+        "lr_gamma": 0.992,
         "data_window": 3,
     },
 }
@@ -297,9 +311,10 @@ class IterativePipeline:
 
         if is_bootstrap:
             num_games = self.config["bootstrap_games"]
-            depth = 1
+            depth = self.config.get("bootstrap_depth", 3)
             model_path = None
-            print(f"  Generating {num_games} random bootstrap games...")
+            print(f"  Generating {num_games} bootstrap games "
+                  f"(Rule-Based AI, depth={depth})...")
         else:
             num_games = self.config["games_per_iter"]
             depth = self._get_depth(iteration)
@@ -311,11 +326,20 @@ class IterativePipeline:
         data_file = str(self.data_dir / f"{self.game}_iter{iteration}.bin")
 
         evaluator = None
-        if model_path and self.config["workers"] == 1:
+        if is_bootstrap:
+            # Use Rule-Based evaluator for bootstrap: gives non-zero scores
+            # and much more diverse game outcomes than random play
+            from src.search.evaluator import RuleBasedEvaluator
+            from src.search.alphabeta import AlphaBetaSearch
+            rule_eval = RuleBasedEvaluator()
+            evaluator = AlphaBetaSearch(
+                rule_eval, max_depth=depth, time_limit_ms=500,
+            )
+        elif model_path and self.config["workers"] == 1:
             from src.search.evaluator import NNUEEvaluator
             from src.search.alphabeta import AlphaBetaSearch
             nnue_eval = NNUEEvaluator.from_numpy(model_path, self.fs)
-            tl = self._get_time_limit(iteration) if not is_bootstrap else 500
+            tl = self._get_time_limit(iteration)
             evaluator = AlphaBetaSearch(
                 nnue_eval, max_depth=depth, time_limit_ms=tl,
             )
@@ -324,10 +348,11 @@ class IterativePipeline:
             feature_set=self.fs,
             evaluator=evaluator,
             search_depth=depth,
-            random_play_prob=0.15 if is_bootstrap else 0.08,
+            random_play_prob=0.10 if is_bootstrap else 0.05,
             game_name=self.game,
             model_path=model_path,
-            time_limit_ms=self._get_time_limit(iteration) if not is_bootstrap else 500,
+            time_limit_ms=self._get_time_limit(iteration) if not is_bootstrap else 2000,
+            use_rule_eval=is_bootstrap,
         )
 
         engine.generate_data(
@@ -366,22 +391,30 @@ class IterativePipeline:
     def _train_model(self, data_files: list, iter_dir: Path,
                      epochs: int, prev_model: str | None) -> tuple:
         """Train a model on collected data files."""
+        max_active = self.fs.max_active_features()
         print(f"  Loading {len(data_files)} data file(s)...")
-        all_samples = preload_samples(data_files)
+        all_data = preload_samples(data_files, max_active=max_active)
+        total_samples = len(all_data["score"])
 
-        # 90/10 train/validation split
-        random.shuffle(all_samples)
-        val_size = max(1, int(len(all_samples) * 0.1))
-        val_samples = all_samples[:val_size]
-        train_samples = all_samples[val_size:]
-        print(f"  Train: {len(train_samples):,} | Val: {len(val_samples):,}")
+        # 90/10 train/validation split via index shuffling
+        indices = list(range(total_samples))
+        random.shuffle(indices)
+        val_size = max(1, int(total_samples * 0.1))
+        val_idx = indices[:val_size]
+        train_idx = indices[val_size:]
+
+        train_data = {k: v[train_idx] for k, v in all_data.items()}
+        val_data = {k: v[val_idx] for k, v in all_data.items()}
+        print(f"  Train: {len(train_idx):,} | Val: {val_size:,}")
 
         trainer = Trainer(
             num_features=self.fs.num_features(),
             lr=self.config["lr"],
             batch_size=self.config["batch_size"],
-            max_active=self.fs.max_active_features(),
-            lambda_=self.config["lambda_"],
+            max_active=max_active,
+            lambda_=self.config.get("lambda_", 1.0),
+            lambda_end=self.config.get("lambda_end", 0.75),
+            lr_gamma=self.config.get("lr_gamma", 0.992),
         )
 
         # Warm-start from previous model if available
@@ -389,20 +422,53 @@ class IterativePipeline:
             print(f"  Warm-starting from {prev_model}")
             trainer.load_weights_from_npz(prev_model)
 
+        # Early stopping: restore best model when val loss stops improving
+        early_stop_patience = self.config.get("early_stop_patience", 15)
+        best_val_loss = float('inf')
+        best_epoch = 0
+        wait = 0
+
         training_log = []
         for epoch in range(epochs):
-            loss = trainer.train_epoch_from_samples(train_samples, shuffle=True)
-            val_loss = trainer.validate_epoch(val_samples)
+            loss = trainer.train_epoch_from_samples(
+                train_data, shuffle=True,
+                epoch=epoch, total_epochs=epochs)
+            val_loss = trainer.validate_epoch(val_data)
             lr = trainer.optimizer.learning_rate
             lr_val = lr.item() if hasattr(lr, 'item') else float(lr)
+            lam = trainer.get_lambda(epoch, epochs)
             training_log.append({
                 "epoch": epoch + 1,
                 "loss": round(loss, 6),
                 "val_loss": round(val_loss, 6),
                 "lr": lr_val,
+                "lambda": round(lam, 4),
             })
-            print(f"    Epoch {epoch + 1}/{epochs} | "
-                  f"Loss: {loss:.6f} | Val: {val_loss:.6f} | LR: {lr_val:.2e}")
+            if (epoch + 1) % 10 == 0 or epoch == 0 or epoch == epochs - 1:
+                print(f"    Epoch {epoch + 1}/{epochs} | "
+                      f"Loss: {loss:.6f} | Val: {val_loss:.6f} | "
+                      f"LR: {lr_val:.2e} | λ: {lam:.3f}")
+
+            # Track best model
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                best_epoch = epoch + 1
+                wait = 0
+                # Save best checkpoint
+                trainer.save_checkpoint(
+                    str(iter_dir / "best.pt"), epoch, val_loss)
+            else:
+                wait += 1
+                if wait >= early_stop_patience:
+                    print(f"    Early stopping at epoch {epoch + 1} "
+                          f"(best val: {best_val_loss:.6f} at epoch {best_epoch})")
+                    break
+
+        # Restore best model if early stopping triggered
+        best_ckpt = iter_dir / "best.npz"
+        if best_ckpt.exists() and wait >= early_stop_patience:
+            trainer.load_checkpoint(str(iter_dir / "best.pt"))
+            print(f"    Restored best model from epoch {best_epoch}")
 
         # Export model
         model_path = str(iter_dir / "model.npz")
@@ -595,8 +661,18 @@ def main():
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--lambda", type=float, default=None, dest="lambda_")
+    parser.add_argument("--lambda-end", type=float, default=None, dest="lambda_end",
+                        help="Lambda end value (decays from --lambda to this)")
+    parser.add_argument("--lr-gamma", type=float, default=None, dest="lr_gamma",
+                        help="LR exponential decay gamma (default 0.992)")
     parser.add_argument("--data-window", type=int, default=None,
                         help="Rolling window of iterations to keep data from")
+    parser.add_argument("--bootstrap-depth", type=int, default=None,
+                        dest="bootstrap_depth",
+                        help="Search depth for bootstrap games")
+    parser.add_argument("--early-stop-patience", type=int, default=None,
+                        dest="early_stop_patience",
+                        help="Epochs without val improvement before stopping")
     parser.add_argument("--eval-depth", type=int, default=None,
                         help="Search depth for evaluation games")
     parser.add_argument("--eval-time-limit", type=int, default=None,
@@ -614,10 +690,11 @@ def main():
 
     # Build config from defaults + overrides
     config = dict(GAME_DEFAULTS.get(args.game, GAME_DEFAULTS["chess"]))
-    for key in ["bootstrap_games", "games_per_iter", "epochs_bootstrap",
-                "epochs_per_iter", "eval_games", "workers", "batch_size",
-                "lr", "lambda_", "data_window", "eval_depth",
-                "eval_time_limit_ms"]:
+    for key in ["bootstrap_games", "bootstrap_depth", "games_per_iter",
+                "epochs_bootstrap", "epochs_per_iter",
+                "early_stop_patience", "eval_games", "workers",
+                "batch_size", "lr", "lambda_", "lambda_end", "lr_gamma",
+                "data_window", "eval_depth", "eval_time_limit_ms"]:
         val = getattr(args, key, None)
         if val is not None:
             config[key] = val

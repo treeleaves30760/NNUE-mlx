@@ -24,9 +24,11 @@ def main():
     parser.add_argument("--game", required=True, choices=FEATURE_SETS.keys())
     parser.add_argument("--data", required=True, help="Path to training data .bin file")
     parser.add_argument("--epochs", type=int, default=50)
-    parser.add_argument("--batch-size", type=int, default=2048)
-    parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--lambda", type=float, default=0.5, dest="lambda_")
+    parser.add_argument("--batch-size", type=int, default=16384)
+    parser.add_argument("--lr", type=float, default=8.75e-4)
+    parser.add_argument("--lambda", type=float, default=1.0, dest="lambda_")
+    parser.add_argument("--lambda-end", type=float, default=0.75, dest="lambda_end")
+    parser.add_argument("--lr-gamma", type=float, default=0.992, dest="lr_gamma")
     parser.add_argument("--resume", type=str, default=None, help="Checkpoint to resume from")
     parser.add_argument("--output-dir", default="models", help="Directory for checkpoints")
     args = parser.parse_args()
@@ -40,6 +42,8 @@ def main():
         batch_size=args.batch_size,
         max_active=fs.max_active_features(),
         lambda_=args.lambda_,
+        lambda_end=args.lambda_end,
+        lr_gamma=args.lr_gamma,
     )
 
     start_epoch = 0
@@ -49,7 +53,7 @@ def main():
 
     output_dir = Path(args.output_dir)
     for epoch in range(start_epoch, args.epochs):
-        loss = trainer.train_epoch(args.data)
+        loss = trainer.train_epoch(args.data, epoch=epoch, total_epochs=args.epochs)
         lr = trainer.optimizer.learning_rate
         lr_val = lr.item() if hasattr(lr, 'item') else float(lr)
         print(f"Epoch {epoch + 1}/{args.epochs} | Loss: {loss:.6f} | LR: {lr_val:.2e}")
