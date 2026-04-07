@@ -12,8 +12,14 @@ uv.lock
 
 # Training artifacts
 data/*.bin
+data/old_runs/
 models/*.pt
 models/*.npz
+models/20??-*/
+
+# Pipeline logs & state
+pipeline_run*.log
+pipeline_state*.json
 
 # OS
 .DS_Store
