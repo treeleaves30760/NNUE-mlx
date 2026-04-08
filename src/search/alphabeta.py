@@ -1,17 +1,9 @@
 """Alpha-beta search with iterative deepening and NNUE evaluation.
 
-Search enhancements:
-  - Quiescence search (captures + promotions until quiet)
-  - Check extensions (+1 ply when in check)
-  - Null move pruning (skip turn, prune if still >= beta)
-  - Late move reductions (reduced depth for late quiet moves)
-  - Principal variation search (zero-width window for non-PV moves)
-  - Aspiration windows (narrow root window from prev iteration)
-  - Futility pruning (skip quiet moves near leaf when eval hopeless)
-  - Root move ordering from previous iteration scores
+Enhancements: quiescence search, check extensions, null-move pruning,
+LMR, PVS, aspiration windows, futility pruning, root move ordering.
 """
 
-import math
 import threading
 import time
 from typing import Dict, List, Optional, Tuple
@@ -19,6 +11,8 @@ from typing import Dict, List, Optional, Tuple
 from src.games.base import GameState, Move
 from src.search.transposition import TranspositionTable, EXACT, ALPHA, BETA
 from src.search.move_ordering import MoveOrdering
+from src.search._lmr import INF, MATE_SCORE
+from src.search._negamax import _NegamaxMixin
 
 try:
     from src.accel import CSearch as _CSearch, AcceleratedAccumulator as _AccelAccum
@@ -26,30 +20,8 @@ except ImportError:
     _CSearch = None
     _AccelAccum = None
 
-# Large value representing a won/lost position
-INF = 1_000_000
-MATE_SCORE = 100_000
 
-# Quiescence search depth limit
-MAX_QDEPTH = 8
-
-# Futility pruning margins (indexed by depth, in centipawn-like units)
-_FUTILITY_MARGINS = [0, 200, 500]
-
-
-def _build_lmr_table(max_depth: int = 64, max_moves: int = 64):
-    """Pre-compute Late Move Reduction table."""
-    table = [[0] * max_moves for _ in range(max_depth)]
-    for d in range(1, max_depth):
-        for m in range(1, max_moves):
-            table[d][m] = max(0, int(1 + math.log(d) * math.log(m) / 2.0))
-    return table
-
-
-_LMR_TABLE = _build_lmr_table()
-
-
-class AlphaBetaSearch:
+class AlphaBetaSearch(_NegamaxMixin):
     """Iterative deepening alpha-beta search engine."""
 
     def __init__(self, evaluator, max_depth: int = 6,
@@ -66,7 +38,6 @@ class AlphaBetaSearch:
         self._use_inplace = False
         self._root_move_scores: Dict[Move, float] = {}
 
-        # Try to create C search engine for maximum speed
         self._csearch = None
         if (_CSearch is not None and _AccelAccum is not None
                 and hasattr(evaluator, 'accumulator')
@@ -83,10 +54,6 @@ class AlphaBetaSearch:
             except Exception:
                 self._csearch = None
 
-    # ------------------------------------------------------------------ #
-    #  Public search methods                                               #
-    # ------------------------------------------------------------------ #
-
     def search(self, state: GameState,
                depth_override: Optional[int] = None) -> Tuple[Optional[Move], float]:
         """Find the best move using iterative deepening alpha-beta."""
@@ -102,14 +69,12 @@ class AlphaBetaSearch:
                 return Move(from_sq=from_sq, to_sq=to_sq,
                             promotion=promo, drop_piece=drop), score
 
-        # Python path
         self._start_time = time.time()
         self._time_up = False
         self.nodes_searched = 0
         self._use_inplace = hasattr(state, 'make_move_inplace')
         self.evaluator.set_position(state)
         self.tt.new_search()
-
         best_move = None
         best_score = -INF
         prev_score = 0
@@ -158,29 +123,23 @@ class AlphaBetaSearch:
         self.nodes_searched = 0
         self._use_inplace = hasattr(state, 'make_move_inplace')
         self.evaluator.set_position(state)
-
         moves = state.legal_moves()
         if not moves:
             return []
-
         best_scores: List[Tuple[Move, float]] = [(m, -INF) for m in moves]
-
         for depth in range(1, self.max_depth + 1):
             iteration_scores: List[Tuple[Move, float]] = []
             tt_entry = self.tt.probe(state.zobrist_hash())
             ordered = self.move_ordering.order_moves(state, moves, depth, tt_entry)
-
             for move in ordered:
                 score = self._do_move_and_search(state, move, depth - 1, -INF, INF)
                 if self._time_up:
                     break
                 iteration_scores.append((move, score))
-
             if self._time_up and depth > 1:
                 break
             if not self._time_up:
                 best_scores = iteration_scores
-
         best_scores.sort(key=lambda x: x[1], reverse=True)
         return best_scores[:n]
 
@@ -195,17 +154,14 @@ class AlphaBetaSearch:
         self.nodes_searched = 0
         self._use_inplace = hasattr(state, 'make_move_inplace')
         self.evaluator.set_position(state)
-
         moves = state.legal_moves()
         if not moves:
             if live_ref is not None:
                 live_ref[0] = (0, self.max_depth, [], True)
             self._stop_event = None
             return []
-
         best_scores: List[Tuple[Move, float]] = [(m, -INF) for m in moves]
         final_depth = 0
-
         for depth in range(1, self.max_depth + 1):
             if stop_event and stop_event.is_set():
                 break
@@ -240,10 +196,6 @@ class AlphaBetaSearch:
             live_ref[0] = (final_depth, self.max_depth, top_n, True)
         self._stop_event = None
         return top_n
-
-    # ------------------------------------------------------------------ #
-    #  Internal helpers                                                    #
-    # ------------------------------------------------------------------ #
 
     @staticmethod
     def _is_capture(board, move: Move) -> bool:
@@ -300,14 +252,10 @@ class AlphaBetaSearch:
             return None, -MATE_SCORE
 
         tt_entry = self.tt.probe(state.zobrist_hash())
-
-        # Order: previous iteration scores, then standard heuristics
         if prev_scores:
             moves.sort(key=lambda m: prev_scores.get(m, -INF), reverse=True)
         else:
             moves = self.move_ordering.order_moves(state, moves, depth, tt_entry)
-
-        # TT move always first
         if tt_entry and tt_entry.best_move and tt_entry.best_move in moves:
             moves.remove(tt_entry.best_move)
             moves.insert(0, tt_entry.best_move)
@@ -322,16 +270,13 @@ class AlphaBetaSearch:
                 score = self._do_move_and_search(state, move, depth - 1,
                                                   alpha, beta)
             else:
-                # PVS: zero-window search
                 score = self._do_move_and_search(state, move, depth - 1,
                                                   alpha, alpha + 1)
                 if alpha < score < beta and not self._time_up:
                     score = self._do_move_and_search(state, move, depth - 1,
                                                       alpha, beta)
-
             if self._time_up:
                 break
-
             move_scores[move] = score
 
             if score > best_score:
@@ -352,199 +297,3 @@ class AlphaBetaSearch:
             flag = EXACT
         self.tt.store(state.zobrist_hash(), depth, best_score, flag, best_move)
         return best_move, best_score
-
-    def _alphabeta(self, state: GameState, depth: int,
-                   alpha: float, beta: float,
-                   allow_null: bool = True) -> float:
-        """Recursive alpha-beta with QSearch, NMP, LMR, PVS, futility."""
-        self.nodes_searched += 1
-
-        # Time / stop check every 4096 nodes
-        if self.nodes_searched & 4095 == 0:
-            if self._stop_event and self._stop_event.is_set():
-                self._time_up = True
-                return 0
-            elapsed = (time.time() - self._start_time) * 1000
-            if elapsed >= self.time_limit_ms:
-                self._time_up = True
-                return 0
-
-        # Terminal node
-        if state.is_terminal():
-            result = state.result()
-            if result is None:
-                return 0
-            if result == 1.0:
-                return MATE_SCORE - (self.max_depth - depth)
-            if result == 0.0:
-                return -MATE_SCORE + (self.max_depth - depth)
-            return 0
-
-        # Check extension: extend search when in check
-        in_check = state.is_check()
-        if in_check:
-            depth += 1
-
-        # Leaf node -> quiescence search
-        if depth <= 0:
-            return self._quiescence(state, alpha, beta)
-
-        # TT probe
-        key = state.zobrist_hash()
-        tt_entry = self.tt.probe(key)
-        if tt_entry is not None and tt_entry.depth >= depth:
-            if tt_entry.flag == EXACT:
-                return tt_entry.score
-            elif tt_entry.flag == ALPHA and tt_entry.score <= alpha:
-                return alpha
-            elif tt_entry.flag == BETA and tt_entry.score >= beta:
-                return beta
-
-        # Null Move Pruning
-        if (allow_null and depth > 2 and not in_check
-                and hasattr(state, 'make_null_move')
-                and hasattr(self.evaluator, 'accumulator')):
-            R = 2 + (1 if depth > 6 else 0)
-            null_state = state.make_null_move()
-            self.evaluator.accumulator.push()
-            score = -self._alphabeta(null_state, depth - 1 - R,
-                                      -beta, -beta + 1, allow_null=False)
-            self.evaluator.accumulator.pop()
-            if self._time_up:
-                return 0
-            if score >= beta:
-                return beta
-
-        # Generate and order moves
-        moves = state.legal_moves()
-        if not moves:
-            if in_check:
-                return -MATE_SCORE + (self.max_depth - depth)
-            return 0  # stalemate
-
-        moves = self.move_ordering.order_moves(state, moves, depth, tt_entry)
-        board = state.board_array()
-
-        # Futility pruning decision
-        futile = False
-        if depth <= 2 and not in_check:
-            static_eval = self.evaluator.evaluate(state)
-            if static_eval + _FUTILITY_MARGINS[depth] <= alpha:
-                futile = True
-
-        orig_alpha = alpha
-        best_score = -INF
-        best_move = None
-
-        for i, move in enumerate(moves):
-            is_cap = self._is_capture(board, move)
-            is_promo = move.promotion is not None
-
-            # Futility: skip quiet moves that can't raise alpha
-            if futile and not is_cap and not is_promo and i > 0:
-                continue
-
-            # LMR: reduce late quiet moves
-            reduction = 0
-            if (i >= 3 and depth >= 3 and not in_check
-                    and not is_cap and not is_promo):
-                reduction = _LMR_TABLE[min(depth, 63)][min(i, 63)]
-                reduction = min(reduction, depth - 2)
-
-            if i == 0:
-                # PVS: full window on first move
-                score = self._do_move_and_search(state, move,
-                                                  depth - 1, alpha, beta)
-            else:
-                # Zero-width search with possible LMR
-                score = self._do_move_and_search(state, move,
-                                                  depth - 1 - reduction,
-                                                  alpha, alpha + 1)
-                # Re-search without LMR if it raised alpha
-                if reduction > 0 and score > alpha and not self._time_up:
-                    score = self._do_move_and_search(state, move,
-                                                      depth - 1,
-                                                      alpha, alpha + 1)
-                # Re-search with full window if PVS raised alpha
-                if alpha < score < beta and not self._time_up:
-                    score = self._do_move_and_search(state, move,
-                                                      depth - 1, alpha, beta)
-
-            if self._time_up:
-                return 0
-
-            if score > best_score:
-                best_score = score
-                best_move = move
-
-            if score >= beta:
-                if not is_cap:
-                    self.move_ordering.update_killers(move, depth)
-                    self.move_ordering.update_history(move, depth)
-                self.tt.store(key, depth, beta, BETA, move)
-                return beta
-
-            if score > alpha:
-                alpha = score
-
-        flag = EXACT if alpha > orig_alpha else ALPHA
-        self.tt.store(key, depth, alpha, flag, best_move)
-        return alpha
-
-    def _quiescence(self, state: GameState, alpha: float,
-                    beta: float, qdepth: int = 0) -> float:
-        """Search captures until the position is quiet."""
-        self.nodes_searched += 1
-
-        if self.nodes_searched & 4095 == 0:
-            if self._stop_event and self._stop_event.is_set():
-                self._time_up = True
-                return 0
-            elapsed = (time.time() - self._start_time) * 1000
-            if elapsed >= self.time_limit_ms:
-                self._time_up = True
-                return 0
-
-        if state.is_terminal():
-            result = state.result()
-            if result is None:
-                return 0
-            if result == 1.0:
-                return MATE_SCORE
-            if result == 0.0:
-                return -MATE_SCORE
-            return 0
-
-        # Stand-pat: static eval as lower bound
-        stand_pat = self.evaluator.evaluate(state)
-        if stand_pat >= beta:
-            return beta
-        if stand_pat > alpha:
-            alpha = stand_pat
-
-        if qdepth >= MAX_QDEPTH:
-            return alpha
-
-        # Generate only captures and promotions
-        moves = state.legal_moves()
-        board = state.board_array()
-        captures = [m for m in moves
-                    if self._is_capture(board, m) or m.promotion is not None]
-
-        if not captures:
-            return alpha
-
-        # Order by MVV-LVA
-        captures = self.move_ordering.order_moves(state, captures, 0, None)
-
-        for move in captures:
-            score = self._do_move_and_qsearch(state, move, alpha, beta,
-                                               qdepth + 1)
-            if self._time_up:
-                return 0
-            if score >= beta:
-                return beta
-            if score > alpha:
-                alpha = score
-
-        return alpha
