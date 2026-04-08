@@ -29,6 +29,7 @@ def main():
     parser.add_argument("--lambda", type=float, default=1.0, dest="lambda_")
     parser.add_argument("--lambda-end", type=float, default=0.75, dest="lambda_end")
     parser.add_argument("--lr-gamma", type=float, default=0.992, dest="lr_gamma")
+    parser.add_argument("--accumulator-size", type=int, default=256, dest="accumulator_size")
     parser.add_argument("--resume", type=str, default=None, help="Checkpoint to resume from")
     parser.add_argument("--output-dir", default="models", help="Directory for checkpoints")
     args = parser.parse_args()
@@ -38,6 +39,7 @@ def main():
 
     trainer = Trainer(
         num_features=fs.num_features(),
+        accumulator_size=args.accumulator_size,
         lr=args.lr,
         batch_size=args.batch_size,
         max_active=fs.max_active_features(),

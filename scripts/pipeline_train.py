@@ -38,6 +38,7 @@ def train_model(fs, config: dict, data_files: list,
 
     trainer = Trainer(
         num_features=fs.num_features(),
+        accumulator_size=config.get("accumulator_size", 256),
         lr=config["lr"],
         batch_size=config["batch_size"],
         max_active=max_active,
