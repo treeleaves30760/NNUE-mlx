@@ -204,6 +204,7 @@ def _worker_play_games(
     num_games: int,
     max_moves: int,
     random_play_prob: float,
+    random_opening_plies: int = 0,
 ) -> bytes:
     """Worker function for multiprocessing (no model). Returns bytes."""
     # Import here to avoid circular import; SelfPlayEngine lives in selfplay.py
@@ -214,6 +215,7 @@ def _worker_play_games(
         feature_set=fs,
         evaluator=None,
         random_play_prob=random_play_prob,
+        random_opening_plies=random_opening_plies,
     )
     buf = io.BytesIO()
     for _ in range(num_games):
@@ -231,6 +233,7 @@ def _worker_play_games_rule_eval(
     num_games: int,
     max_moves: int,
     random_play_prob: float,
+    random_opening_plies: int = 0,
 ) -> bytes:
     """Worker function with RuleBasedEvaluator for bootstrap. Returns bytes."""
     from src.search.evaluator import RuleBasedEvaluator
@@ -247,6 +250,7 @@ def _worker_play_games_rule_eval(
         evaluator=searcher,
         search_depth=search_depth,
         random_play_prob=random_play_prob,
+        random_opening_plies=random_opening_plies,
     )
     buf = io.BytesIO()
     for _ in range(num_games):
@@ -266,6 +270,7 @@ def _worker_play_games_with_model(
     max_moves: int,
     random_play_prob: float,
     shm_info: Optional[Dict] = None,
+    random_opening_plies: int = 0,
 ) -> bytes:
     """Worker function with NNUE model. Loads from shared memory or file."""
     from src.search.evaluator import NNUEEvaluator
@@ -287,6 +292,7 @@ def _worker_play_games_with_model(
         evaluator=searcher,
         search_depth=search_depth,
         random_play_prob=random_play_prob,
+        random_opening_plies=random_opening_plies,
     )
     buf = io.BytesIO()
     for _ in range(num_games):
