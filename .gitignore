@@ -13,6 +13,7 @@ uv.lock
 # Training artifacts
 data/*.bin
 data/old_runs/
+data/old_v1/
 models/*.pt
 models/*.npz
 models/20??-*/
