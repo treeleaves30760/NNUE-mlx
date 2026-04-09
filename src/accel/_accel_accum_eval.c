@@ -12,9 +12,9 @@ AccelAccum_evaluate(AccelAccumObject *self, PyObject *args)
     int l2 = self->l2_size;
 
     /* Stack-allocated scratch buffers -- no heap allocation. */
-    float input[512];   /* acc_size * 2, max 256*2 = 512 */
-    float l1_out[64];   /* l1_size, max 64 */
-    float l2_out[64];   /* l2_size, max 64 */
+    float input[1024];  /* acc_size * 2, max 512*2 = 1024 */
+    float l1_out[256];  /* l1_size, max 256 */
+    float l2_out[256];  /* l2_size, max 256 */
 
     /* 1. ClippedReLU + perspective-ordered concat.
      * For int16 mode: dequantize + ClippedReLU in one pass. */

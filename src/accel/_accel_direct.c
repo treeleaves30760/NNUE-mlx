@@ -14,9 +14,9 @@ _accel_evaluate_direct(AccelAccumObject *acc, int side_to_move)
     int l1       = acc->l1_size;
     int l2       = acc->l2_size;
 
-    float input[512];   /* acc_size * 2, max 256*2 */
-    float l1_out[64];   /* l1_size, max 64 */
-    float l2_out[64];   /* l2_size, max 64 */
+    float input[1024];  /* acc_size * 2, max 512*2 = 1024 */
+    float l1_out[256];  /* l1_size, max 256 */
+    float l2_out[256];  /* l2_size, max 256 */
 
     if (acc->use_int16) {
         int16_t *first  = (side_to_move == 0) ? acc->white_acc_q : acc->black_acc_q;

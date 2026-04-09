@@ -3,9 +3,9 @@
 Architecture:
     HalfKP features -> Feature Transformer (Embedding + sum -> 256)
     -> ClippedReLU -> Concat perspectives (512)
-    -> Linear(512, 32) -> SCReLU
-    -> Linear(32, 32)  -> SCReLU
-    -> Linear(32, 1)   -> evaluation score
+    -> Linear(512, 128) -> SCReLU
+    -> Linear(128, 32)  -> SCReLU
+    -> Linear(32, 1)    -> evaluation score
 
 Uses Apple MLX for native Apple Silicon training with unified memory.
 SCReLU (Squared Clipped ReLU) provides ~50% effective capacity increase
@@ -22,7 +22,7 @@ class NNUEModel(nn.Module):
     """NNUE evaluation network with dual-perspective feature transformer."""
 
     def __init__(self, num_features: int, accumulator_size: int = 256,
-                 l1_size: int = 32, l2_size: int = 32):
+                 l1_size: int = 128, l2_size: int = 32):
         """
         Args:
             num_features: Total HalfKP feature space size (e.g. 40960 for chess).
