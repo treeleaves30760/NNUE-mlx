@@ -34,29 +34,62 @@ class ExponentialDecayLR:
         return current_lr
 
 
+class CosineAnnealingLR:
+    """Cosine annealing learning rate schedule with warm restarts.
+
+    lr = min_lr + 0.5 * (max_lr - min_lr) * (1 + cos(pi * epoch / total_epochs))
+    Better final convergence than exponential decay.
+    """
+
+    def __init__(self, max_lr: float, total_epochs: int, min_lr: float = 1e-6):
+        self.max_lr = max_lr
+        self.total_epochs = max(1, total_epochs)
+        self.min_lr = min_lr
+        self._epoch = 0
+
+    def step(self, loss: float, optimizer) -> float:
+        """Update learning rate following cosine schedule."""
+        import math
+        current_lr = optimizer.learning_rate.item() if hasattr(
+            optimizer.learning_rate, 'item') else float(optimizer.learning_rate)
+        self._epoch += 1
+        t = min(self._epoch / self.total_epochs, 1.0)
+        new_lr = self.min_lr + 0.5 * (self.max_lr - self.min_lr) * (1 + math.cos(math.pi * t))
+        optimizer.learning_rate = new_lr
+        return current_lr
+
+
 class Trainer:
     """Trains an NNUE model with MLX on Apple Silicon."""
 
     def __init__(self, num_features: int, accumulator_size: int = 256,
-                 lr: float = 8.75e-4, batch_size: int = 16384,
+                 l1_size: int = 128, lr: float = 8.75e-4,
+                 batch_size: int = 16384,
                  max_active: int = 32, lambda_: float = 1.0,
-                 lambda_end: float = 0.75, lr_gamma: float = 0.992):
+                 lambda_end: float = 0.75, lr_gamma: float = 0.992,
+                 mirror_table: np.ndarray = None,
+                 total_epochs: int = 100,
+                 max_grad_norm: float = 1.0):
         self.batch_size = batch_size
         self.max_active = max_active
         self.lambda_ = lambda_
         self.lambda_end = lambda_end
+        self.mirror_table = mirror_table
+        self.max_grad_norm = max_grad_norm
+        self._lr = lr
 
         self.model = NNUEModel(
             num_features=num_features,
             accumulator_size=accumulator_size,
+            l1_size=l1_size,
         )
         mx.eval(self.model.parameters())  # Force initialization
 
         self._current_lambda = lambda_  # Updated per-epoch by lambda schedule
 
         self.optimizer = optim.Adam(learning_rate=lr)
-        self.scheduler = ExponentialDecayLR(
-            gamma=lr_gamma, min_lr=1e-6
+        self.scheduler = CosineAnnealingLR(
+            max_lr=lr, total_epochs=total_epochs, min_lr=1e-6
         )
 
         # Build loss+grad function
@@ -96,6 +129,8 @@ class Trainer:
         entire step into one Metal compute graph.
         """
         loss, grads = self._loss_and_grad_fn(self.model, batch)
+        # Gradient clipping to prevent instability
+        grads, _ = optim.clip_grad_norm(grads, max_norm=self.max_grad_norm)
         self.optimizer.update(self.model, grads)
         return loss
 
@@ -143,7 +178,8 @@ class Trainer:
         num_batches = 0
 
         for batch in load_batches_from_samples(
-            samples, self.batch_size, self.max_active, shuffle=shuffle
+            samples, self.batch_size, self.max_active, shuffle=shuffle,
+            mirror_table=self.mirror_table if shuffle else None,
         ):
             loss = self._compiled_step(batch)
             mx.eval(loss)
@@ -173,19 +209,15 @@ class Trainer:
             num_batches += 1
         return (total_loss / max(num_batches, 1)).item()
 
-    def load_weights_from_npz(self, npz_path: str):
+    def load_weights_from_npz(self, npz_path: str, total_epochs: int = 100):
         """Load model weights from an exported .npz file (for warm-starting)."""
         data = np.load(npz_path)
         weights = [(k, mx.array(data[k])) for k in data.files]
         self.model.load_weights(weights)
         # Reset optimizer state for the new iteration
-        self.optimizer = optim.Adam(
-            learning_rate=float(self.optimizer.learning_rate.item()
-                                if hasattr(self.optimizer.learning_rate, 'item')
-                                else self.optimizer.learning_rate)
-        )
-        self.scheduler = ExponentialDecayLR(
-            gamma=self.scheduler.gamma, min_lr=1e-6
+        self.optimizer = optim.Adam(learning_rate=self._lr)
+        self.scheduler = CosineAnnealingLR(
+            max_lr=self._lr, total_epochs=total_epochs, min_lr=1e-6
         )
         # Re-build compiled step with fresh optimizer state
         self._state = [self.model.state, self.optimizer.state]

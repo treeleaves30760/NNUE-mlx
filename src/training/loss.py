@@ -28,6 +28,10 @@ def nnue_loss(predicted: mx.array, score: mx.array,
     Uses |p - target|^2.6 instead of squared error for better gradient
     distribution on large-error samples.
 
+    Score-magnitude weighting: positions with larger |score| contribute
+    more to the loss, since they carry more information about piece
+    activity and positional evaluation.
+
     Args:
         predicted: Model output, shape (batch, 1).
         score: Search evaluation in centipawns, shape (batch,).
@@ -40,4 +44,7 @@ def nnue_loss(predicted: mx.array, score: mx.array,
     p = mx.sigmoid(mx.squeeze(predicted, axis=-1) * OUTPUT_SCALE / EVAL_SCALE)
     t_eval = mx.sigmoid(score / EVAL_SCALE)
     target = lambda_ * t_eval + (1.0 - lambda_) * result
-    return mx.mean(mx.abs(p - target) ** LOSS_EXPONENT)
+    # Score-magnitude weighting: positions with non-trivial scores are
+    # more informative than dead-equal positions.
+    score_weight = mx.clip(mx.abs(score) / 200.0, 0.5, 2.0)
+    return mx.mean(score_weight * mx.abs(p - target) ** LOSS_EXPONENT)
