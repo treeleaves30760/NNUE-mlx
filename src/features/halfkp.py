@@ -170,6 +170,30 @@ class HalfKP(FeatureSet):
 
         return (added, removed)
 
+    def mirror_table(self) -> np.ndarray:
+        """Build a lookup table that maps feature index → horizontally mirrored index.
+
+        Flipping the board file-wise (a↔h) is a valid symmetry for chess.
+        Returns an int32 array of shape (num_features,).
+        """
+        ns = self._num_squares
+        npt = self._num_piece_types
+        board_width = int(ns ** 0.5)  # 8 for chess, 6 for minichess
+
+        table = np.empty(self._total, dtype=np.int32)
+        for f in range(self._total):
+            piece_sq = f % ns
+            temp = f // ns
+            color_type = temp % (npt * 2)
+            king_sq = temp // (npt * 2)
+
+            # Mirror: flip file within rank
+            mk = (king_sq // board_width) * board_width + (board_width - 1 - king_sq % board_width)
+            mp = (piece_sq // board_width) * board_width + (board_width - 1 - piece_sq % board_width)
+            table[f] = mk * self._piece_sq_combos + color_type * ns + mp
+
+        return table
+
     def _fallback_delta(
         self, state_before: GameState, state_after: GameState, perspective: int
     ) -> Tuple[List[int], List[int]]:

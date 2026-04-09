@@ -108,6 +108,7 @@ def load_batches_from_samples(
     max_active: int = 32,
     shuffle: bool = True,
     prefetch: int = 8,
+    mirror_table: np.ndarray = None,
 ) -> Iterator[Dict[str, mx.array]]:
     """Yield batches from pre-loaded numpy arrays with optional shuffling.
 
@@ -116,9 +117,11 @@ def load_batches_from_samples(
     - List of tuples (legacy) -> falls back to per-sample collation
 
     Uses threaded prefetch for CPU/GPU overlap.
+    If mirror_table is provided, each batch has a 50% chance of being mirrored.
     """
     if isinstance(samples, dict):
-        yield from _batches_from_arrays(samples, batch_size, shuffle, prefetch)
+        yield from _batches_from_arrays(samples, batch_size, shuffle, prefetch,
+                                         mirror_table)
     else:
         yield from _batches_from_tuples(samples, batch_size, max_active,
                                          shuffle, prefetch)
@@ -129,8 +132,13 @@ def _batches_from_arrays(
     batch_size: int,
     shuffle: bool,
     prefetch: int,
+    mirror_table: np.ndarray = None,
 ) -> Iterator[Dict[str, mx.array]]:
-    """Fast path: batch via numpy fancy indexing, no per-sample Python loop."""
+    """Fast path: batch via numpy fancy indexing, no per-sample Python loop.
+
+    If mirror_table is provided, each batch has a 50% chance of having all
+    feature indices remapped via the mirror lookup table (horizontal flip).
+    """
     n = len(arrays["score"])
     indices = np.arange(n, dtype=np.int64)
     if shuffle:
@@ -141,7 +149,19 @@ def _batches_from_arrays(
     def _producer():
         for start in range(0, n, batch_size):
             idx = indices[start:start + batch_size]
-            batch = {k: mx.array(v[idx]) for k, v in arrays.items()}
+            batch_np = {k: v[idx] for k, v in arrays.items()}
+            # Data augmentation: mirror with 50% probability
+            if mirror_table is not None and np.random.random() < 0.5:
+                wf = batch_np["white_features"]
+                bf = batch_np["black_features"]
+                wm = batch_np["white_mask"]
+                bm = batch_np["black_mask"]
+                # Only mirror non-padding indices (mask > 0)
+                wf_mir = np.where(wm > 0, mirror_table[wf], 0)
+                bf_mir = np.where(bm > 0, mirror_table[bf], 0)
+                batch_np["white_features"] = wf_mir
+                batch_np["black_features"] = bf_mir
+            batch = {k: mx.array(v) for k, v in batch_np.items()}
             q.put(batch)
         q.put(None)
 
