@@ -36,21 +36,27 @@ def train_model(fs, config: dict, data_files: list,
     val_data = {k: v[val_idx] for k, v in all_data.items()}
     print(f"  Train: {len(train_idx):,} | Val: {val_size:,}")
 
+    # Build mirror table for data augmentation if feature set supports it
+    mirror_tbl = fs.mirror_table() if hasattr(fs, 'mirror_table') else None
+
     trainer = Trainer(
         num_features=fs.num_features(),
         accumulator_size=config.get("accumulator_size", 256),
+        l1_size=config.get("l1_size", 128),
         lr=config["lr"],
         batch_size=config["batch_size"],
         max_active=max_active,
         lambda_=config.get("lambda_", 1.0),
         lambda_end=config.get("lambda_end", 0.75),
         lr_gamma=config.get("lr_gamma", 0.992),
+        mirror_table=mirror_tbl,
+        total_epochs=epochs,
     )
 
     # Warm-start from previous model if available
     if prev_model and Path(prev_model).exists():
         print(f"  Warm-starting from {prev_model}")
-        trainer.load_weights_from_npz(prev_model)
+        trainer.load_weights_from_npz(prev_model, total_epochs=epochs)
 
     # Early stopping: restore best model when val loss stops improving
     early_stop_patience = config.get("early_stop_patience", 15)
@@ -163,6 +169,7 @@ def generate_data(game_name: str, fs, config: dict,
 
     tl_engine = (_get_schedule("time_limit_schedule", iteration)
                  if not is_bootstrap else 2000)
+    random_opening = config.get("random_opening_plies", 8) if not is_bootstrap else 4
     engine = SelfPlayEngine(
         feature_set=fs,
         evaluator=evaluator,
@@ -172,12 +179,14 @@ def generate_data(game_name: str, fs, config: dict,
         model_path=model_path,
         time_limit_ms=tl_engine,
         use_rule_eval=is_bootstrap,
+        random_opening_plies=random_opening,
     )
 
     engine.generate_data(
         initial_state_fn=lambda: create_game(game_name),
         output_path=data_file,
         num_games=num_games,
+        max_moves=config.get("max_moves", 200),
         num_workers=config["workers"],
     )
 
@@ -188,16 +197,19 @@ def collect_data_files(game_name: str, config: dict,
                        data_dir: Path, iteration: int) -> list:
     """Collect data files within the rolling window.
 
-    Always includes bootstrap data (iter0) to maintain a large
-    baseline training set, plus recent iterations within the window.
+    Includes bootstrap data only for the first N iterations (configured by
+    bootstrap_window, default 3). After that, the model should have
+    surpassed material-level play, and bootstrap data would pull it back.
     """
     window = config["data_window"]
+    bootstrap_window = config.get("bootstrap_window", 99)
     files = []
 
-    # Always include bootstrap data
-    bootstrap_path = str(data_dir / f"{game_name}_iter0.bin")
-    if Path(bootstrap_path).exists():
-        files.append(bootstrap_path)
+    # Include bootstrap data only for early iterations
+    if iteration <= bootstrap_window:
+        bootstrap_path = str(data_dir / f"{game_name}_iter0.bin")
+        if Path(bootstrap_path).exists():
+            files.append(bootstrap_path)
 
     # Add recent iterations (excluding iter0 to avoid duplicating bootstrap)
     start = max(1, iteration + 1 - window)
