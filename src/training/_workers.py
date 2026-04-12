@@ -236,14 +236,12 @@ def _worker_play_games_rule_eval(
     random_opening_plies: int = 0,
 ) -> bytes:
     """Worker function with RuleBasedEvaluator for bootstrap. Returns bytes."""
-    from src.search.evaluator import RuleBasedEvaluator
-    from src.search.alphabeta import AlphaBetaSearch
+    from src.search.alphabeta import create_rule_based_search
     from src.training.selfplay import SelfPlayEngine
 
     fs = _create_feature_set(game_name)
-    rule_eval = RuleBasedEvaluator()
-    searcher = AlphaBetaSearch(
-        rule_eval, max_depth=search_depth, time_limit_ms=time_limit_ms,
+    searcher = create_rule_based_search(
+        game_name, max_depth=search_depth, time_limit_ms=time_limit_ms,
     )
     engine = SelfPlayEngine(
         feature_set=fs,

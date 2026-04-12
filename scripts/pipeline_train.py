@@ -156,10 +156,10 @@ def generate_data(game_name: str, fs, config: dict,
 
     evaluator = None
     if is_bootstrap:
-        from src.search.evaluator import RuleBasedEvaluator
-        from src.search.alphabeta import AlphaBetaSearch
-        rule_eval = RuleBasedEvaluator()
-        evaluator = AlphaBetaSearch(rule_eval, max_depth=depth, time_limit_ms=500)
+        from src.search.alphabeta import create_rule_based_search
+        evaluator = create_rule_based_search(
+            game_name, max_depth=depth, time_limit_ms=500,
+        )
     elif model_path and config["workers"] == 1:
         from src.search.evaluator import NNUEEvaluator
         from src.search.alphabeta import AlphaBetaSearch
