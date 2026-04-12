@@ -262,11 +262,14 @@ def initial_state() -> ShogiState:
 
     Gote (BLACK=1) pieces are at ranks 0-2 (negative values).
     Sente (WHITE=0) pieces are at ranks 6-8 (positive values).
-    Row 0 (gote back rank): L N S G K G S N L
-    Row 1: gote rook (file 1), gote bishop (file 7)
-    Row 2: gote pawns; Row 6: sente pawns
-    Row 7: sente bishop (file 1), sente rook (file 7)
-    Row 8 (sente back rank): L N S G K G S N L
+
+    Internal file index f renders at screen column (8 - f), which the GUI
+    labels as traditional file (f + 1). Standard positions (2h / 8h / 2b /
+    8b in traditional notation):
+      - Sente rook at 2h   -> traditional file 2 -> internal file 1
+      - Sente bishop at 8h -> traditional file 8 -> internal file 7
+      - Gote bishop at 2b  -> traditional file 2 -> internal file 1
+      - Gote rook at 8b    -> traditional file 8 -> internal file 7
     """
     board = np.zeros(81, dtype=np.int8)
     # Piece values (positive = sente encoding)
@@ -275,18 +278,18 @@ def initial_state() -> ShogiState:
     back_rank = [L, N, S, G, K, G, S, N, L]
     for f, piece in enumerate(back_rank):
         board[_sq(0, f)] = -piece
-    # Gote rook & bishop (row 1)
-    board[_sq(1, 7)] = -B  # bishop at file 7
-    board[_sq(1, 1)] = -R  # rook at file 1
+    # Gote bishop (file 2 = internal 1) & rook (file 8 = internal 7)
+    board[_sq(1, 1)] = -B
+    board[_sq(1, 7)] = -R
     # Gote pawns (row 2)
     for f in range(9):
         board[_sq(2, f)] = -1  # -Pawn
     # Sente pawns (row 6)
     for f in range(9):
         board[_sq(6, f)] = 1  # +Pawn
-    # Sente rook & bishop (row 7)
-    board[_sq(7, 1)] = B   # bishop at file 1
-    board[_sq(7, 7)] = R   # rook at file 7
+    # Sente rook (file 2 = internal 1) & bishop (file 8 = internal 7)
+    board[_sq(7, 1)] = R
+    board[_sq(7, 7)] = B
     # Sente back rank (row 8)
     for f, piece in enumerate(back_rank):
         board[_sq(8, f)] = piece
