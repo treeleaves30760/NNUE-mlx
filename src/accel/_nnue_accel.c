@@ -17,4 +17,19 @@
 #include "_csearch_root.c"
 #include "_csearch_lifecycle.c"
 #include "_csearch_methods.c"
+/* ---- Self-contained shogi C layer (position, movegen, make/unmake) ---- */
+#include "_shogi_constants.c"
+#include "_shogi_make_unmake.c"
+#include "_shogi_movegen_c.c"
+#include "_shogi_pyapi.c"
+#include "_shogi_eval_c.c"
+#include "_shogi_rule_search.c"
+/* ---- Chess rule-based evaluator (C port of _chess_rule_based) ---- */
+#include "_chess_eval_c.c"
+/* ---- Chess C engine (constants, movegen, make/unmake, pyapi) ------ */
+#include "_chess_constants.c"
+#include "_chess_make_unmake.c"
+#include "_chess_movegen_c.c"
+#include "_chess_pyapi.c"
+#include "_chess_rule_search.c"
 #include "_accel_module.c"
