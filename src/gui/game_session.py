@@ -5,8 +5,9 @@ from typing import Dict, List, Optional
 
 import pygame
 
-from src.games.base import WHITE, BLACK
+from src.games.base import GameState, WHITE, BLACK
 from src.gui._board_interaction import _BoardInteractionMixin
+from src.gui.analysis import AnalysisController
 from src.gui.constants import BG, DEPTH_MAX
 from src.gui.panel import draw_panel, eval_white_pov
 from src.utils.config import create_game
@@ -35,12 +36,15 @@ class GameSession(_BoardInteractionMixin):
         self.status_text = ""
         self.score_history: List[float] = [eval_white_pov(self.state)]
 
-        # Analysis
-        self.analysis_live: list = [None]
-        self.analysis_stop = threading.Event()
-        self.analysis_state_id: Optional[int] = None
+        # Analysis: the controller owns worker lifecycle and commit logic.
+        # hint_* fields are the display-facing mirror of controller.committed,
+        # refreshed once per frame in _update_analysis.
+        self.analysis = AnalysisController(
+            search_factory=self._build_analysis_search,
+        )
         self.hint_moves: list = []
         self.hint_depth = 0
+        self.hint_max_depth = 0
         self.hint_done = False
 
         # Panel clickable rects (populated after first draw)
@@ -82,33 +86,42 @@ class GameSession(_BoardInteractionMixin):
 
     # -------------------------------------------------- Analysis
     def _cancel_analysis(self):
-        self.analysis_stop.set()
-        self.analysis_live = [None]
-        self.analysis_state_id = None
-        self.analysis_stop = threading.Event()
+        """Stop any running analysis worker and forget its output."""
+        self.analysis.cancel()
 
     def _launch_analysis(self):
-        self._cancel_analysis()
-        self.analysis_state_id = id(self.state)
-        if self.state.is_terminal():
-            return
-        if (self.app.mode == "human-vs-ai"
-                and self.state.side_to_move() == self.ai_side):
-            return
-        fresh_live = [None]
-        self.analysis_live = fresh_live
-        _st = self.state.copy()
-        _stop = self.analysis_stop
-        _ev = self.app._make_evaluator(
-            self.app.game_name, self.app.model_path)
-        from src.search.alphabeta import AlphaBetaSearch
-        _hs = AlphaBetaSearch(_ev, max_depth=DEPTH_MAX,
-                              time_limit_ms=600_000)
+        """Kick off a new analysis run for the current position."""
+        self.analysis.launch(self.state)
 
-        def _worker():
-            _hs.search_top_n_live(_st, n=3, live_ref=fresh_live,
-                                  stop_event=_stop)
-        threading.Thread(target=_worker, daemon=True).start()
+    def _build_analysis_search(self, state: GameState):
+        """Factory used by AnalysisController to build a search engine.
+
+        Returns ``None`` when analysis should be suppressed for the given
+        state — e.g. when it's the AI's turn in human-vs-AI mode, where
+        the AI searcher already owns the thinking budget. The controller
+        treats ``None`` as "leave committed state empty, spawn no worker".
+        """
+        if (self.app.mode == "human-vs-ai"
+                and state.side_to_move() == self.ai_side):
+            return None
+
+        # Shogi without an NNUE model: use the C-backed rule search in
+        # infinite-depth mode so the GUI keeps deepening until cancelled.
+        # Everything else goes through the Python AlphaBetaSearch with
+        # whichever evaluator the app configured.
+        if self.app.game_name == "shogi" and not self.app.model_path:
+            from src.search.alphabeta import create_rule_based_search
+            return create_rule_based_search(
+                "shogi", max_depth=0, time_limit_ms=0,
+            )
+
+        evaluator = self.app._make_evaluator(
+            self.app.game_name, self.app.model_path,
+        )
+        from src.search.alphabeta import AlphaBetaSearch
+        return AlphaBetaSearch(
+            evaluator, max_depth=DEPTH_MAX, time_limit_ms=600_000,
+        )
 
     # -------------------------------------------------- Restart
     def _restart(self):
@@ -150,14 +163,9 @@ class GameSession(_BoardInteractionMixin):
         if key == pygame.K_r:
             self._restart()
         if key == pygame.K_h:
+            # Flip the toggle; _update_analysis handles both launch and
+            # teardown based on app.analysis_on in the same frame.
             self.app.analysis_on = not self.app.analysis_on
-            if self.app.analysis_on:
-                self._launch_analysis()
-            else:
-                self._cancel_analysis()
-                self.hint_moves = []
-                self.hint_depth = 0
-                self.hint_done = False
         return None
 
     # -------------------------------------------------- Update
@@ -212,28 +220,53 @@ class GameSession(_BoardInteractionMixin):
                 self.status_text = "AI: no move found"
 
     def _update_analysis(self):
+        """Drive the analysis controller and mirror its committed state.
+
+        Runs every frame. Responsibilities (in order):
+          1. If analysis is off, tear down any running worker and clear
+             the display mirror so stale hints don't linger.
+          2. If the controller is running for a different state object
+             (because the player or AI just moved), relaunch it for the
+             current position.
+          3. Ingest the latest live snapshot; if that produces a *fresh*
+             first commit for this ply, seed the score chart once.
+          4. Mirror ``controller.committed`` onto ``hint_*`` fields so
+             the draw path has simple, stable data to render.
+        """
         if not self.app.analysis_on:
+            if self.analysis.committed is not None or self.hint_moves:
+                self.analysis.cancel()
+                self._clear_hint_mirror()
             return
 
-        snap = self.analysis_live[0]
-        if snap is not None and self.analysis_state_id == id(self.state):
-            d, md, moves, done = snap
-            self.hint_moves = moves
-            self.hint_depth = d
-            self.hint_done = done
+        if not self.analysis.is_for(self.state):
+            self.analysis.launch(self.state)
+            self._clear_hint_mirror()
+            return
 
-        if self.analysis_state_id != id(self.state):
-            self.hint_moves = []
-            self.hint_depth = 0
-            self.hint_done = False
-            self._launch_analysis()
+        fresh_commit = self.analysis.update(self.state)
+        if fresh_commit is not None and self.score_history:
+            # First commit of this ply: replace the material-only seed
+            # at score_history[-1] with the deep-search evaluation.
+            white_score = (fresh_commit.best_score
+                           if self.state.side_to_move() == WHITE
+                           else -fresh_commit.best_score)
+            self.score_history[-1] = white_score / 100.0
 
-        # Live-update chart with analysis eval
-        if self.hint_moves and self.score_history:
-            best = self.hint_moves[0][1]
-            white_s = (best if self.state.side_to_move() == WHITE
-                       else -best)
-            self.score_history[-1] = white_s / 100.0
+        committed = self.analysis.committed
+        if committed is None:
+            self._clear_hint_mirror()
+        else:
+            self.hint_moves = committed.moves
+            self.hint_depth = committed.depth
+            self.hint_max_depth = committed.max_depth
+            self.hint_done = committed.done
+
+    def _clear_hint_mirror(self):
+        self.hint_moves = []
+        self.hint_depth = 0
+        self.hint_max_depth = 0
+        self.hint_done = False
 
     def _check_terminal(self):
         if not self.state.is_terminal():
@@ -282,6 +315,7 @@ class GameSession(_BoardInteractionMixin):
             self.state, self.hint_moves, self.ai_thinking,
             self.status_text, self.app.analysis_on,
             self.hint_depth, self.hint_done, self.score_history,
+            hint_max_depth=self.hint_max_depth,
         )
         pygame.display.flip()
 

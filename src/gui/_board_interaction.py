@@ -17,14 +17,10 @@ class _BoardInteractionMixin:
             if not rect.collidepoint(mx, my):
                 continue
             if key == "hint":
+                # Toggle only. _update_analysis picks up the new flag
+                # value on the next frame and handles both launch and
+                # teardown (including clearing the hint mirror).
                 self.app.analysis_on = not self.app.analysis_on
-                if self.app.analysis_on:
-                    self._launch_analysis()
-                else:
-                    self._cancel_analysis()
-                    self.hint_moves = []
-                    self.hint_depth = 0
-                    self.hint_done = False
             elif key == "restart":
                 self._restart()
             elif key == "menu":

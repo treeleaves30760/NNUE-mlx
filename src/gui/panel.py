@@ -132,6 +132,7 @@ def draw_panel(app, px: int, py: int, pw: int,
                analysis_on: bool = False,
                hint_depth: int = 0, hint_done: bool = False,
                score_history: Optional[List[float]] = None,
+               hint_max_depth: int = 0,
                ) -> Dict[str, pygame.Rect]:
     """Draw the in-game side panel. Returns dict of clickable rects."""
     rects: Dict[str, pygame.Rect] = {}
@@ -188,10 +189,15 @@ def draw_panel(app, px: int, py: int, pw: int,
     screen.blit(lbl, (x, y)); y += 20
 
     if analysis_on:
+        # Infinite-analysis mode reports a sentinel max depth far beyond
+        # the configured DEPTH_MAX (the C shogi rule search uses ~64 as its
+        # safety cap). Show "depth D/∞" in that case.
+        infinite = hint_max_depth > DEPTH_MAX
         if hint_done:
             toggle_lbl = f"ON  \u2014  depth {hint_depth} (done)"
         elif hint_depth > 0:
-            toggle_lbl = f"ON  \u2014  depth {hint_depth}/{DEPTH_MAX}..."
+            cap = "\u221e" if infinite else str(hint_max_depth or DEPTH_MAX)
+            toggle_lbl = f"ON  \u2014  depth {hint_depth}/{cap}..."
         else:
             toggle_lbl = "ON  \u2014  starting..."
     else:
