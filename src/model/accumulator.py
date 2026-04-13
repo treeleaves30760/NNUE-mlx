@@ -25,8 +25,8 @@ class IncrementalAccumulator:
             l1_bias: (l1_size,) first hidden layer bias.
             l2_weight: (l2_size, l1_size) second hidden layer weights.
             l2_bias: (l2_size,) second hidden layer bias.
-            out_weight: (1, l2_size) output layer weights.
-            out_bias: (1,) output layer bias.
+            out_weight: (num_buckets, l2_size) output layer weights.
+            out_bias: (num_buckets,) output layer bias.
         """
         self.ft_weight = ft_weight
         self.ft_bias = ft_bias
@@ -34,8 +34,9 @@ class IncrementalAccumulator:
         self.l1_bias = l1_bias
         self.l2_weight = l2_weight
         self.l2_bias = l2_bias
-        self.out_weight = out_weight.flatten()
-        self.out_bias = float(out_bias.flatten()[0])
+        self.out_weight = np.atleast_2d(out_weight)
+        self.out_bias = np.atleast_1d(out_bias).flatten()
+        self.num_buckets = self.out_weight.shape[0]
 
         # Current accumulator state for each perspective
         acc_size = len(ft_bias)
@@ -43,7 +44,7 @@ class IncrementalAccumulator:
         self.black_acc = np.copy(ft_bias).astype(np.float32)
 
         # Pre-allocated stack for save/restore during search tree traversal
-        max_depth = 64
+        max_depth = 256
         self._stack_w = np.zeros((max_depth, acc_size), dtype=np.float32)
         self._stack_b = np.zeros((max_depth, acc_size), dtype=np.float32)
         self._sp = 0
@@ -98,14 +99,15 @@ class IncrementalAccumulator:
         np.copyto(self.white_acc, self._stack_w[sp])
         np.copyto(self.black_acc, self._stack_b[sp])
 
-    def evaluate(self, side_to_move: int) -> float:
+    def evaluate(self, side_to_move: int, bucket_idx: int = 0) -> float:
         """Run forward pass through the small hidden layers.
 
         This is extremely fast on CPU (~microseconds) because the layers
-        are tiny: 512 -> 32 -> 32 -> 1.
+        are tiny: 512 -> 128 -> 32 -> num_buckets.
 
         Args:
             side_to_move: 0=white, 1=black.
+            bucket_idx: Output bucket index (0 for single-bucket models).
 
         Returns:
             Evaluation score (positive = good for side to move).
@@ -127,7 +129,7 @@ class IncrementalAccumulator:
         x = np.clip(self.l2_weight @ x + self.l2_bias, 0.0, 1.0)
         x = x * x
         # Output
-        return float(self.out_weight @ x + self.out_bias)
+        return float(self.out_weight[bucket_idx] @ x + self.out_bias[bucket_idx])
 
     @classmethod
     def from_model(cls, model) -> "IncrementalAccumulator":

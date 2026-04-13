@@ -15,8 +15,9 @@ typedef struct {
     float *l1_bias;          /* [l1_size] */
     float *l2_weight;        /* [l2_size * l1_size] */
     float *l2_bias;          /* [l2_size] */
-    float *out_weight;       /* [l2_size] */
-    float  out_bias;
+    float *out_weight;       /* [num_buckets * l2_size] row-major */
+    float *out_bias;         /* [num_buckets] */
+    int    num_buckets;
 
     /* Float32 accumulator state */
     float *white_acc;        /* [accumulator_size] */

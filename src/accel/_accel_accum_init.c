@@ -10,6 +10,7 @@ AccelAccum_dealloc(AccelAccumObject *self)
     free(self->l2_weight);
     free(self->l2_bias);
     free(self->out_weight);
+    free(self->out_bias);
     free(self->white_acc);
     free(self->black_acc);
     free(self->stack_buf);
@@ -78,11 +79,34 @@ AccelAccum_init(AccelAccumObject *self, PyObject *args, PyObject *kwds)
     int is_int16 = is_numpy_int16(py_ft_weight);
     self->use_int16 = is_int16;
 
+    /* Parse num_buckets from out_weight shape (ndim==1 -> legacy, ndim==2 -> bucketed). */
+    int num_buckets = 1;
+    {
+        PyObject *ow_shape = PyObject_GetAttrString(py_out_weight, "shape");
+        if (!ow_shape) return -1;
+        Py_ssize_t ow_ndim = PyTuple_Size(ow_shape);
+        if (ow_ndim == 2) {
+            num_buckets = (int)PyLong_AsLong(PyTuple_GetItem(ow_shape, 0));
+        }
+        Py_DECREF(ow_shape);
+        if (num_buckets <= 0) num_buckets = 1;
+    }
+
+    /* Defensive dtype check: l1_weight, l2_weight, out_weight must be float32. */
+    if (is_numpy_int16(py_l1_weight) || is_numpy_int16(py_l2_weight) ||
+        is_numpy_int16(py_out_weight)) {
+        PyErr_SetString(PyExc_TypeError,
+            "l1_weight, l2_weight, and out_weight must be float32; "
+            "only ft_weight may be int16");
+        return -1;
+    }
+
     /* Initialize pointers to NULL for clean dealloc */
     self->ft_weight = NULL; self->ft_bias = NULL;
     self->l1_weight = NULL; self->l1_bias = NULL;
     self->l2_weight = NULL; self->l2_bias = NULL;
-    self->out_weight = NULL;
+    self->out_weight = NULL; self->out_bias = NULL;
+    self->num_buckets = num_buckets;
     self->white_acc = NULL; self->black_acc = NULL;
     self->stack_buf = NULL;
     self->ft_weight_q = NULL; self->ft_bias_q = NULL;
@@ -120,10 +144,11 @@ AccelAccum_init(AccelAccumObject *self, PyObject *args, PyObject *kwds)
         self->l1_bias    = aligned_alloc_f32(l1);
         self->l2_weight  = aligned_alloc_f32((size_t)l2 * l1);
         self->l2_bias    = aligned_alloc_f32(l2);
-        self->out_weight = aligned_alloc_f32(l2);
+        self->out_weight = aligned_alloc_f32((size_t)num_buckets * l2);
+        self->out_bias   = aligned_alloc_f32(num_buckets);
 
         if (!self->l1_weight || !self->l1_bias || !self->l2_weight ||
-            !self->l2_bias || !self->out_weight) {
+            !self->l2_bias || !self->out_weight || !self->out_bias) {
             PyErr_SetString(PyExc_MemoryError, "Failed to allocate float32 aligned memory");
             return -1;
         }
@@ -136,10 +161,10 @@ AccelAccum_init(AccelAccumObject *self, PyObject *args, PyObject *kwds)
             return -1;
         if (copy_numpy_to_aligned(py_l2_bias, self->l2_bias, l2) < 0)
             return -1;
-        if (copy_numpy_to_aligned(py_out_weight, self->out_weight, l2) < 0)
+        if (copy_numpy_to_aligned(py_out_weight, self->out_weight, (Py_ssize_t)num_buckets * l2) < 0)
             return -1;
-
-        { float tmp[1]; if (copy_numpy_to_aligned(py_out_bias, tmp, 1) < 0) return -1; self->out_bias = tmp[0]; }
+        if (copy_numpy_to_aligned(py_out_bias, self->out_bias, num_buckets) < 0)
+            return -1;
 
         /* Initialize int16 accumulators to bias */
         memcpy(self->white_acc_q, self->ft_bias_q, acc * sizeof(int16_t));
@@ -156,15 +181,16 @@ AccelAccum_init(AccelAccumObject *self, PyObject *args, PyObject *kwds)
         self->l1_bias    = aligned_alloc_f32(l1);
         self->l2_weight  = aligned_alloc_f32((size_t)l2 * l1);
         self->l2_bias    = aligned_alloc_f32(l2);
-        self->out_weight = aligned_alloc_f32(l2);
+        self->out_weight = aligned_alloc_f32((size_t)num_buckets * l2);
+        self->out_bias   = aligned_alloc_f32(num_buckets);
         self->white_acc  = aligned_alloc_f32(acc);
         self->black_acc  = aligned_alloc_f32(acc);
         self->stack_buf  = aligned_alloc_f32((size_t)self->max_stack * 2 * acc);
 
         if (!self->ft_weight || !self->ft_bias || !self->l1_weight ||
             !self->l1_bias || !self->l2_weight || !self->l2_bias ||
-            !self->out_weight || !self->white_acc || !self->black_acc ||
-            !self->stack_buf) {
+            !self->out_weight || !self->out_bias || !self->white_acc ||
+            !self->black_acc || !self->stack_buf) {
             PyErr_SetString(PyExc_MemoryError, "Failed to allocate aligned memory");
             return -1;
         }
@@ -181,10 +207,10 @@ AccelAccum_init(AccelAccumObject *self, PyObject *args, PyObject *kwds)
             return -1;
         if (copy_numpy_to_aligned(py_l2_bias, self->l2_bias, l2) < 0)
             return -1;
-        if (copy_numpy_to_aligned(py_out_weight, self->out_weight, l2) < 0)
+        if (copy_numpy_to_aligned(py_out_weight, self->out_weight, (Py_ssize_t)num_buckets * l2) < 0)
             return -1;
-
-        { float tmp[1]; if (copy_numpy_to_aligned(py_out_bias, tmp, 1) < 0) return -1; self->out_bias = tmp[0]; }
+        if (copy_numpy_to_aligned(py_out_bias, self->out_bias, num_buckets) < 0)
+            return -1;
 
         memcpy(self->white_acc, self->ft_bias, acc * sizeof(float));
         memcpy(self->black_acc, self->ft_bias, acc * sizeof(float));

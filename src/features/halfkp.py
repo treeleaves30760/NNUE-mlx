@@ -42,6 +42,9 @@ class HalfKP(FeatureSet):
         # Each piece type has two colors (own/opponent from perspective)
         self._piece_sq_combos = num_piece_types * 2 * num_squares
         self._total = num_squares * self._piece_sq_combos
+        # chess=30 non-king pieces max, minichess=22
+        self._max_material = 30 if num_squares == 64 else 22
+        self._max_feature_count = self.max_active_features()
 
         # Pre-compute bv2type array for C extension
         if board_val_to_type:
@@ -59,6 +62,10 @@ class HalfKP(FeatureSet):
     def max_active_features(self) -> int:
         # Maximum pieces on board minus kings: 30 for chess, 22 for LA
         return 30 if self._num_squares == 64 else 22
+
+    def _is_king(self, piece_type: int) -> bool:
+        # pieces_on_board() already excludes kings; this is a no-op safety guard
+        return False
 
     def _feature_index(self, king_sq: int, piece_type: int,
                        piece_color: int, piece_sq: int,

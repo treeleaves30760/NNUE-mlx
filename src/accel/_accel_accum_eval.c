@@ -4,8 +4,12 @@ static PyObject *
 AccelAccum_evaluate(AccelAccumObject *self, PyObject *args)
 {
     int side_to_move;
-    if (!PyArg_ParseTuple(args, "i", &side_to_move))
+    int bucket_idx = 0;
+    if (!PyArg_ParseTuple(args, "i|i", &side_to_move, &bucket_idx))
         return NULL;
+
+    if (bucket_idx < 0 || bucket_idx >= self->num_buckets)
+        bucket_idx = 0;
 
     int acc_size = self->accumulator_size;
     int l1 = self->l1_size;
@@ -40,8 +44,9 @@ AccelAccum_evaluate(AccelAccumObject *self, PyObject *args)
     sgemv(l2, l1, 1.0f, self->l2_weight, l1, l1_out, 1.0f, l2_out);
     neon_screlu_inplace(l2_out, l2);
 
-    /* 4. Output: dot product + bias. */
-    float result = sdot(l2, self->out_weight, l2_out) + self->out_bias;
+    /* 4. Output: dot product + bias, selecting the requested bucket row. */
+    const float *out_row = self->out_weight + (size_t)bucket_idx * l2;
+    float result = sdot(l2, out_row, l2_out) + self->out_bias[bucket_idx];
 
     return PyFloat_FromDouble((double)result);
 }
@@ -113,19 +118,15 @@ AccelAccum_from_model(PyTypeObject *type, PyObject *args)
         return NULL;
     }
 
-    /* Flatten out_weight from (1, l2_size) to (l2_size,). */
-    PyObject *flatten_method = PyObject_GetAttrString(out_w, "flatten");
-    PyObject *out_w_flat = PyObject_CallNoArgs(flatten_method);
-    Py_DECREF(flatten_method);
-
+    /* Pass out_weight as-is (may be 1D legacy or 2D bucketed); flatten out_bias
+     * to ensure it is always 1D. */
     PyObject *flatten_method2 = PyObject_GetAttrString(out_b, "flatten");
     PyObject *out_b_flat = PyObject_CallNoArgs(flatten_method2);
     Py_DECREF(flatten_method2);
 
     /* Create the AccelAccumObject. */
     PyObject *init_args = PyTuple_Pack(8, ft_w, ft_b, l1_w, l1_b,
-                                          l2_w, l2_b, out_w_flat, out_b_flat);
-    Py_DECREF(out_w_flat);
+                                          l2_w, l2_b, out_w, out_b_flat);
     Py_DECREF(out_b_flat);
 
     PyObject *obj = type->tp_new(type, PyTuple_New(0), NULL);

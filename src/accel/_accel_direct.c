@@ -38,7 +38,7 @@ _accel_evaluate_direct(AccelAccumObject *acc, int side_to_move)
     sgemv(l2, l1, 1.0f, acc->l2_weight, l1, l1_out, 1.0f, l2_out);
     neon_screlu_inplace(l2_out, l2);
 
-    return sdot(l2, acc->out_weight, l2_out) + acc->out_bias;
+    return sdot(l2, acc->out_weight, l2_out) + acc->out_bias[0];
 }
 
 static inline void

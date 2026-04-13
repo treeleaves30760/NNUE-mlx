@@ -17,6 +17,29 @@ OUTPUT_SCALE = 32.0  # Model output × OUTPUT_SCALE → centipawn-like range
 LOSS_EXPONENT = 2.6
 
 
+def nnue_loss_wdl(score_pred: mx.array, wdl_pred: mx.array,
+                  score: mx.array, result: mx.array,
+                  lambda_: float = 1.0,
+                  wdl_weight: float = 0.5) -> mx.array:
+    """Dual-head loss: score head fits eval + result blend, WDL head fits game result directly.
+
+    total = score_loss + wdl_weight * wdl_loss
+
+    score_loss: same as nnue_loss (sigmoid + power-2.6)
+    wdl_loss: binary cross-entropy on sigmoid(wdl_pred) vs result
+    """
+    p = mx.sigmoid(mx.squeeze(score_pred, axis=-1) * OUTPUT_SCALE / EVAL_SCALE)
+    t_eval = mx.sigmoid(score / EVAL_SCALE)
+    target = lambda_ * t_eval + (1.0 - lambda_) * result
+    score_weight = mx.clip(mx.abs(score) / 200.0, 0.5, 2.0)
+    score_loss_per_sample = score_weight * mx.abs(p - target) ** LOSS_EXPONENT
+
+    wdl_prob = mx.sigmoid(mx.squeeze(wdl_pred, axis=-1))
+    bce = -(result * mx.log(wdl_prob + 1e-8) + (1 - result) * mx.log(1 - wdl_prob + 1e-8))
+
+    return mx.mean(score_loss_per_sample) + wdl_weight * mx.mean(bce)
+
+
 def nnue_loss(predicted: mx.array, score: mx.array,
               result: mx.array, lambda_: float = 1.0) -> mx.array:
     """Blended loss between search score fitting and game result fitting.

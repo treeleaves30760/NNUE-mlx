@@ -30,7 +30,8 @@ class HalfKPShogi(FeatureSet):
     def __init__(self, num_squares: int, num_board_piece_types: int,
                  num_hand_piece_types: int, max_hand_count: int,
                  board_val_to_type: Optional[Dict[int, int]] = None,
-                 king_board_val: int = 8):
+                 king_board_val: int = 8,
+                 hand_encoding: str = "ordinal"):
         """
         Args:
             num_squares: Board size (81 for shogi, 25 for mini shogi).
@@ -41,6 +42,9 @@ class HalfKPShogi(FeatureSet):
                                   5 for mini shogi: P/S/G/B/R).
             max_hand_count: Maximum count of one piece type in hand
                            (18 for shogi pawns, 2 for mini shogi).
+            hand_encoding: "ordinal" (default) or "onehot".
+                Ordinal: count=k emits k features ("at least 1", ..., "at least k").
+                Onehot: count=k emits 1 feature at slot k-1 ("exactly k"). k=0 emits nothing.
         """
         self._num_squares = num_squares
         self._num_board_piece_types = num_board_piece_types
@@ -48,16 +52,23 @@ class HalfKPShogi(FeatureSet):
         self._max_hand_count = max_hand_count
         self._board_val_to_type = board_val_to_type or {}
         self._king_board_val = king_board_val
+        self._hand_encoding = hand_encoding
 
         # Board features: king_sq * (piece_types * 2 colors * squares)
         self._piece_sq_combos = num_board_piece_types * 2 * num_squares
         self._board_features = num_squares * self._piece_sq_combos
 
         # Hand features: king_sq * (hand_piece_types * 2 sides * max_count)
+        # Layout is the same for both ordinal and onehot; only semantics differ.
         self._hand_combos = num_hand_piece_types * 2 * max_hand_count
         self._hand_features = num_squares * self._hand_combos
 
         self._total = self._board_features + self._hand_features
+
+        # shogi=38 non-king pieces max (excluding 2 kings from 40 total),
+        # minishogi=10 (excluding 2 kings from 12 total)
+        self._max_material = 38 if num_squares == 81 else 10
+        self._max_feature_count = self.max_active_features()
 
         # Pre-compute bv2type array for C extension
         if board_val_to_type:
@@ -76,6 +87,10 @@ class HalfKPShogi(FeatureSet):
         # Generous upper bound: all pieces on board + hand pieces
         return 40 if self._num_squares == 81 else 12
 
+    def _is_king(self, piece_type: int) -> bool:
+        # pieces_on_board() already excludes kings; safety guard only
+        return False
+
     def _board_feature_index(self, king_sq: int, piece_type: int,
                              piece_color: int, piece_sq: int,
                              perspective: int) -> int:
@@ -90,26 +105,38 @@ class HalfKPShogi(FeatureSet):
                               side: int, perspective: int) -> List[int]:
         """Generate feature indices for hand pieces.
 
-        Each hand piece with count N generates N features (one for each count
-        level 1..N), encoding "this side has at least k of this piece type".
+        Ordinal: count=k emits k features at slots 0..k-1 ("at least 1..k").
+        Onehot:  count=k emits 1 feature at slot k-1 ("exactly k"). k=0 emits nothing.
         """
         relative_color = 0 if side == perspective else 1
         indices = []
-        for piece_type, count in hand.items():
-            for k in range(min(count, self._max_hand_count)):
-                idx = (self._board_features
-                       + king_sq * self._hand_combos
-                       + (relative_color * self._num_hand_piece_types + piece_type)
-                       * self._max_hand_count
-                       + k)
-                indices.append(idx)
+        if self._hand_encoding == "ordinal":
+            for piece_type, count in hand.items():
+                for k in range(min(count, self._max_hand_count)):
+                    idx = (self._board_features
+                           + king_sq * self._hand_combos
+                           + (relative_color * self._num_hand_piece_types + piece_type)
+                           * self._max_hand_count
+                           + k)
+                    indices.append(idx)
+        else:  # onehot
+            for piece_type, count in hand.items():
+                if count >= 1:
+                    k = min(count, self._max_hand_count) - 1
+                    idx = (self._board_features
+                           + king_sq * self._hand_combos
+                           + (relative_color * self._num_hand_piece_types + piece_type)
+                           * self._max_hand_count
+                           + k)
+                    indices.append(idx)
         return indices
 
     def active_features(self, state: GameState, perspective: int) -> List[int]:
         king_sq = state.king_square(perspective)
 
-        # C accelerated path
-        if _HAS_ACCEL and self._bv2type_arr is not None:
+        # C accelerated path only for ordinal encoding
+        if (self._hand_encoding == "ordinal"
+                and _HAS_ACCEL and self._bv2type_arr is not None):
             board = state.board_array()
             hand0 = state.hand_pieces(0)
             hand1 = state.hand_pieces(1)
@@ -127,7 +154,7 @@ class HalfKPShogi(FeatureSet):
                 bytes(h1t), bytes(h1c), len(h1t),
             )
 
-        # Python fallback
+        # Python fallback (also used for onehot encoding)
         features = []
         for piece_type, color, sq in state.pieces_on_board():
             idx = self._board_feature_index(king_sq, piece_type, color, sq, perspective)
@@ -145,6 +172,10 @@ class HalfKPShogi(FeatureSet):
         king_after = state_after.king_square(perspective)
         if king_before != king_after:
             return None  # Full refresh needed
+
+        # onehot encoding: always use set-difference fallback
+        if self._hand_encoding == "onehot":
+            return self._fallback_delta(state_before, state_after, perspective)
 
         # Fast path: derive delta from the move
         if not self._board_val_to_type:
@@ -236,6 +267,52 @@ class HalfKPShogi(FeatureSet):
         after_set = set(self.active_features(state_after, perspective))
         return (list(after_set - before_set), list(before_set - after_set))
 
+    def material_bucket(self, state: GameState, num_buckets: int = 8) -> int:
+        """Map material count (board + hand) to an output bucket index.
+
+        Bucket 0 = fewest pieces (late endgame), num_buckets-1 = most (opening).
+        Hand pieces count as material in shogi.
+        """
+        board_count = len(list(state.pieces_on_board()))
+        hand_count = sum(
+            sum(h.values()) for h in (state.hand_pieces(0), state.hand_pieces(1))
+        )
+        count = board_count + hand_count
+        return min((count * num_buckets) // (self._max_material + 1), num_buckets - 1)
+
+    def mirror_table(self) -> Optional[np.ndarray]:
+        """Build a lookup table mapping feature index to horizontally mirrored index.
+
+        Only supported for ordinal hand encoding. Returns None for onehot.
+        File mirror: sq -> (sq // board_width) * board_width + (board_width - 1 - sq % board_width)
+        Hand features are identity-mapped (hand is side-local, no spatial meaning).
+        """
+        if self._hand_encoding != "ordinal":
+            return None
+
+        ns = self._num_squares
+        board_width = int(ns ** 0.5)  # 9 for 9x9, 5 for 5x5
+
+        table = np.empty(self._total, dtype=np.int32)
+
+        # Board features
+        npt = self._num_board_piece_types
+        for f in range(self._board_features):
+            piece_sq = f % ns
+            temp = f // ns
+            color_type = temp % (npt * 2)
+            king_sq = temp // (npt * 2)
+
+            mk = (king_sq // board_width) * board_width + (board_width - 1 - king_sq % board_width)
+            mp = (piece_sq // board_width) * board_width + (board_width - 1 - piece_sq % board_width)
+            table[f] = mk * self._piece_sq_combos + color_type * ns + mp
+
+        # Hand features: identity (no spatial mirror for hand pieces)
+        for f in range(self._board_features, self._total):
+            table[f] = f
+
+        return table
+
 
 def shogi_features() -> HalfKPShogi:
     """Create feature set for standard 9x9 shogi."""
@@ -266,4 +343,36 @@ def minishogi_features() -> HalfKPShogi:
             7: 5, 8: 6, 9: 7, 10: 8,
         },
         king_board_val=6,
+    )
+
+
+def shogi_features_onehot() -> HalfKPShogi:
+    """Create feature set for standard 9x9 shogi with onehot hand encoding."""
+    return HalfKPShogi(
+        num_squares=81,
+        num_board_piece_types=13,
+        num_hand_piece_types=7,
+        max_hand_count=18,
+        board_val_to_type={
+            1: 0, 2: 1, 3: 2, 4: 3, 5: 4, 6: 5, 7: 6,
+            9: 7, 10: 8, 11: 9, 12: 10, 13: 11, 14: 12,
+        },
+        king_board_val=8,
+        hand_encoding="onehot",
+    )
+
+
+def minishogi_features_onehot() -> HalfKPShogi:
+    """Create feature set for 5x5 mini shogi with onehot hand encoding."""
+    return HalfKPShogi(
+        num_squares=25,
+        num_board_piece_types=9,
+        num_hand_piece_types=5,
+        max_hand_count=2,
+        board_val_to_type={
+            1: 0, 2: 1, 3: 2, 4: 3, 5: 4,
+            7: 5, 8: 6, 9: 7, 10: 8,
+        },
+        king_board_val=6,
+        hand_encoding="onehot",
     )

@@ -53,10 +53,15 @@ except ImportError:
 class NNUEEvaluator:
     """Wraps the incremental accumulator for use in alpha-beta search."""
 
+    # Class-level default; overridden per-instance when loaded from file.
+    EVAL_OUTPUT_SCALE = 128.0
+
     def __init__(self, accumulator: IncrementalAccumulator,
                  feature_set: FeatureSet):
         self.accumulator = accumulator
         self.feature_set = feature_set
+        self.output_eval_scale: float = self.EVAL_OUTPUT_SCALE
+        self.num_output_buckets: int = 1
 
     def set_position(self, state: GameState):
         """Initialize accumulator for a root position (full recompute)."""
@@ -64,16 +69,20 @@ class NNUEEvaluator:
         bf = self.feature_set.active_features(state, 1)
         self.accumulator.refresh(wf, bf)
 
-    # Scale raw NNUE output to centipawn-like range for search.
-    # Trained with OUTPUT_SCALE=32 in loss, so model output of 1.0 ~ 32 cp.
-    EVAL_OUTPUT_SCALE = 128.0
-
     def evaluate(self, state: GameState) -> float:
         """Evaluate current position using the accumulator.
 
         Returns score from side-to-move's perspective in centipawn-like units.
         """
-        return self.accumulator.evaluate(state.side_to_move()) * self.EVAL_OUTPUT_SCALE
+        if self.num_output_buckets > 1:
+            bucket_idx = self.feature_set.material_bucket(state, self.num_output_buckets)
+        else:
+            bucket_idx = 0
+        try:
+            raw = self.accumulator.evaluate(state.side_to_move(), bucket_idx=bucket_idx)
+        except TypeError:
+            raw = self.accumulator.evaluate(state.side_to_move())
+        return raw * self.output_eval_scale
 
     def push_move(self, state_before: GameState, move: Move,
                   state_after: GameState):
@@ -131,29 +140,51 @@ class NNUEEvaluator:
         is_quantized = ft_weight.dtype == np.int16
         quant_scale = float(data["quant_scale"]) if "quant_scale" in data else 512.0
 
+        # Read metadata (optional keys; graceful fallback for old models).
+        output_eval_scale = float(data["output_eval_scale"]) if "output_eval_scale" in data else cls.EVAL_OUTPUT_SCALE
+        num_output_buckets = int(data["num_output_buckets"]) if "num_output_buckets" in data else 1
+
+        # Assemble mutable weight dict so int8 dequant can update entries.
+        weights: dict = {
+            "l1.weight": data["l1.weight"],
+            "l2.weight": data["l2.weight"],
+            "output.weight": data["output.weight"],
+        }
+
+        # Per-layer int8 dequantization (full-int8 quantized models only).
+        for key, scale_key in [
+            ("l1.weight", "l1_scale"),
+            ("l2.weight", "l2_scale"),
+            ("output.weight", "output_scale"),
+        ]:
+            w = weights[key]
+            if w.dtype == np.int8:
+                scale = float(data[scale_key])
+                weights[key] = w.astype(np.float32) * scale
+
         if is_quantized and _HAS_ACCEL:
-            # Pass int16 weights directly to C extension (auto-detects dtype)
+            # Pass int16 FT weights directly to C extension (auto-detects dtype)
             accumulator = _AccelAccum(
                 ft_weight=ft_weight,
                 ft_bias=data["ft_bias"],
-                l1_weight=data["l1.weight"],
+                l1_weight=weights["l1.weight"],
                 l1_bias=data["l1.bias"],
-                l2_weight=data["l2.weight"],
+                l2_weight=weights["l2.weight"],
                 l2_bias=data["l2.bias"],
-                out_weight=data["output.weight"],
+                out_weight=weights["output.weight"],
                 out_bias=data["output.bias"],
                 quant_scale=quant_scale,
             )
         elif is_quantized:
-            # No C extension: dequantize to float32 for numpy fallback
+            # No C extension: dequantize FT to float32 for numpy fallback
             accumulator = IncrementalAccumulator(
                 ft_weight=ft_weight.astype(np.float32) / quant_scale,
                 ft_bias=data["ft_bias"].astype(np.float32) / quant_scale,
-                l1_weight=data["l1.weight"],
+                l1_weight=weights["l1.weight"],
                 l1_bias=data["l1.bias"],
-                l2_weight=data["l2.weight"],
+                l2_weight=weights["l2.weight"],
                 l2_bias=data["l2.bias"],
-                out_weight=data["output.weight"],
+                out_weight=weights["output.weight"],
                 out_bias=data["output.bias"],
             )
         else:
@@ -161,14 +192,18 @@ class NNUEEvaluator:
             accumulator = AccumClass(
                 ft_weight=ft_weight,
                 ft_bias=data["ft_bias"],
-                l1_weight=data["l1.weight"],
+                l1_weight=weights["l1.weight"],
                 l1_bias=data["l1.bias"],
-                l2_weight=data["l2.weight"],
+                l2_weight=weights["l2.weight"],
                 l2_bias=data["l2.bias"],
-                out_weight=data["output.weight"],
+                out_weight=weights["output.weight"],
                 out_bias=data["output.bias"],
             )
-        return cls(accumulator, feature_set)
+
+        ev = cls(accumulator, feature_set)
+        ev.output_eval_scale = output_eval_scale
+        ev.num_output_buckets = num_output_buckets
+        return ev
 
 
 def _game_name(state: GameState) -> str:

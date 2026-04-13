@@ -11,7 +11,8 @@ from mlx.utils import tree_flatten
 from src.model.device import device_info
 from src.model.nnue import NNUEModel
 from src.training.dataset import load_batches, load_batches_from_samples, preload_samples
-from src.training.loss import nnue_loss
+from src.training.loss import nnue_loss, nnue_loss_wdl
+from src.training.factorize import build_factor_map, expand_batch_with_virtual, bake_virtual_into_main
 
 
 class ExponentialDecayLR:
@@ -63,7 +64,13 @@ class Trainer:
     """Trains an NNUE model with MLX on Apple Silicon."""
 
     def __init__(self, num_features: int, accumulator_size: int = 256,
-                 l1_size: int = 128, lr: float = 8.75e-4,
+                 l1_size: int = 128, l2_size: int = 32,
+                 num_output_buckets: int = 1,
+                 use_wdl_head: bool = False,
+                 wdl_weight: float = 0.5,
+                 factorize: bool = False,
+                 feature_set=None,
+                 lr: float = 8.75e-4,
                  batch_size: int = 16384,
                  max_active: int = 32, lambda_: float = 1.0,
                  lambda_end: float = 0.75, lr_gamma: float = 0.992,
@@ -77,11 +84,37 @@ class Trainer:
         self.mirror_table = mirror_table
         self.max_grad_norm = max_grad_norm
         self._lr = lr
+        self.use_wdl_head = use_wdl_head
+        self.wdl_weight = wdl_weight
+        self.num_output_buckets = num_output_buckets
+
+        # Factorization setup
+        self.factor_map_mx = None
+        self.num_main_features = num_features
+        if factorize:
+            if feature_set is None:
+                raise ValueError("feature_set is required when factorize=True")
+            factor_map_np, num_virtual = build_factor_map(feature_set)
+            total_features = num_features + num_virtual
+            self.factor_map_mx = mx.array(factor_map_np)
+            self.num_main_features = num_features
+        else:
+            total_features = num_features
+
+        # Bucketing setup
+        self.feature_set_for_bucket = None
+        if num_output_buckets > 1:
+            if feature_set is None:
+                raise ValueError("feature_set is required when num_output_buckets > 1")
+            self.feature_set_for_bucket = feature_set
 
         self.model = NNUEModel(
-            num_features=num_features,
+            num_features=total_features,
             accumulator_size=accumulator_size,
             l1_size=l1_size,
+            l2_size=l2_size,
+            num_output_buckets=num_output_buckets,
+            use_wdl_head=use_wdl_head,
         )
         mx.eval(self.model.parameters())  # Force initialization
 
@@ -115,11 +148,35 @@ class Trainer:
 
     def _loss_fn(self, model, batch):
         """Loss function for value_and_grad. Takes model as first arg."""
+        if self.factor_map_mx is not None:
+            batch = expand_batch_with_virtual(batch, self.factor_map_mx, self.num_main_features)
+
+        if self.feature_set_for_bucket is not None:
+            num_w = mx.sum(batch["white_mask"], axis=1).astype(mx.int32)
+            num_b = mx.sum(batch["black_mask"], axis=1).astype(mx.int32)
+            max_fc = self.feature_set_for_bucket._max_feature_count
+            total = num_w + num_b
+            bucket_idx = mx.minimum(
+                (total * self.num_output_buckets) // (2 * max_fc + 1),
+                self.num_output_buckets - 1,
+            )
+        else:
+            bucket_idx = None
+
         pred = model(
             batch["white_features"], batch["black_features"],
             batch["white_mask"], batch["black_mask"],
             batch["side_to_move"],
+            bucket_idx=bucket_idx,
         )
+
+        if self.use_wdl_head:
+            score_pred, wdl_pred = pred
+            return nnue_loss_wdl(
+                score_pred, wdl_pred,
+                batch["score"], batch["result"],
+                self._current_lambda, self.wdl_weight,
+            )
         return nnue_loss(pred, batch["score"], batch["result"], self._current_lambda)
 
     def _train_step(self, batch):
@@ -198,12 +255,38 @@ class Trainer:
         for batch in load_batches_from_samples(
             samples, self.batch_size, self.max_active, shuffle=False
         ):
+            if self.factor_map_mx is not None:
+                batch = expand_batch_with_virtual(batch, self.factor_map_mx, self.num_main_features)
+
+            if self.feature_set_for_bucket is not None:
+                num_w = mx.sum(batch["white_mask"], axis=1).astype(mx.int32)
+                num_b = mx.sum(batch["black_mask"], axis=1).astype(mx.int32)
+                max_fc = self.feature_set_for_bucket._max_feature_count
+                total = num_w + num_b
+                bucket_idx = mx.minimum(
+                    (total * self.num_output_buckets) // (2 * max_fc + 1),
+                    self.num_output_buckets - 1,
+                )
+            else:
+                bucket_idx = None
+
             pred = self.model(
                 batch["white_features"], batch["black_features"],
                 batch["white_mask"], batch["black_mask"],
                 batch["side_to_move"],
+                bucket_idx=bucket_idx,
             )
-            loss = nnue_loss(pred, batch["score"], batch["result"], self._current_lambda)
+
+            if self.use_wdl_head:
+                score_pred, wdl_pred = pred
+                loss = nnue_loss_wdl(
+                    score_pred, wdl_pred,
+                    batch["score"], batch["result"],
+                    self._current_lambda, self.wdl_weight,
+                )
+            else:
+                loss = nnue_loss(pred, batch["score"], batch["result"], self._current_lambda)
+
             mx.eval(loss)
             total_loss = total_loss + loss
             num_batches += 1
@@ -248,6 +331,31 @@ class Trainer:
 
     def export_numpy(self, filepath: str):
         """Export model weights as .npz for CPU inference during search."""
-        weights = {k: np.array(v) for k, v in tree_flatten(self.model.parameters())}
-        np.savez(filepath, **weights)
-        print(f"Exported numpy weights to {filepath}")
+        self.save_weights(filepath)
+
+    def save_weights(self, npz_path: str):
+        """Save model weights as .npz with training metadata.
+
+        If the model was trained with factorization, the virtual feature rows are
+        baked into the main feature table so inference is unchanged.
+
+        Metadata keys saved alongside weights:
+            num_output_buckets: int
+            output_eval_scale: float32 (128.0 — matches evaluator.py constant)
+        """
+        weights = {k: np.array(v, dtype=np.float32)
+                   for k, v in tree_flatten(self.model.parameters())}
+
+        if self.factor_map_mx is not None:
+            ft_key = "feature_table.weight"
+            if ft_key in weights:
+                factor_map_np = np.array(self.factor_map_mx, dtype=np.int32)
+                weights[ft_key] = bake_virtual_into_main(
+                    weights[ft_key], factor_map_np, self.num_main_features
+                )
+
+        weights["num_output_buckets"] = np.array(self.num_output_buckets, dtype=np.int32)
+        weights["output_eval_scale"] = np.array(128.0, dtype=np.float32)
+
+        np.savez(npz_path, **weights)
+        print(f"Exported numpy weights to {npz_path}")
