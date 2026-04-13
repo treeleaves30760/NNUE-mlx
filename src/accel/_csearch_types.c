@@ -43,6 +43,10 @@ static inline int cmove_is_null(const CMove *m) {
     return (m->from_sq == -1 && m->to_sq == -1);
 }
 
+/* Forward declaration for the C-native TT entry, defined in
+ * _csearch_cnative.c (included later in the same translation unit). */
+struct CNTTEntry;
+
 typedef struct {
     PyObject_HEAD
 
@@ -87,6 +91,14 @@ typedef struct {
 
     /* Cached Move class */
     PyObject *Move_class;
+
+    /* C-native (Lazy SMP) transposition table — allocated lazily on the
+     * first call to search_cnative_*. Uses a different entry layout
+     * (atomic with Stockfish XOR trick) than the legacy `tt` field, so
+     * they can't share storage. */
+    struct CNTTEntry *cn_tt;
+    uint32_t          cn_tt_size;
+    uint32_t          cn_tt_mask;
 
 } CSearchObject;
 

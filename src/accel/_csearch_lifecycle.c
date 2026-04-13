@@ -6,6 +6,7 @@ static void
 CSearch_dealloc(CSearchObject *self)
 {
     free(self->tt);
+    free(self->cn_tt);
     free(self->history);
     Py_XDECREF(self->str_legal_moves);
     Py_XDECREF(self->str_make_move_inplace);

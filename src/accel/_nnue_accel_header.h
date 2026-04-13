@@ -8,6 +8,8 @@
 #include <stdlib.h>
 #include <math.h>
 #include <time.h>
+#include <pthread.h>
+#include <stdatomic.h>
 
 #ifdef USE_NEON
 #include <arm_neon.h>

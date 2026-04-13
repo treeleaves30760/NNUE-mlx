@@ -184,6 +184,14 @@ CSearch_search_top_n(CSearchObject *self, PyObject *args)
 
 /* ---- CSearch method table ---------------------------------------------- */
 
+/* Forward declarations for the C-native (multi-threaded Lazy SMP) search
+ * methods defined in _csearch_cnative.c — same translation unit so no
+ * linker bridge is needed. */
+static PyObject *CSearch_search_cnative_chess(CSearchObject *self, PyObject *args);
+static PyObject *CSearch_search_cnative_shogi(CSearchObject *self, PyObject *args);
+static PyObject *CSearch_search_cnative_live_chess(CSearchObject *self, PyObject *args);
+static PyObject *CSearch_search_cnative_live_shogi(CSearchObject *self, PyObject *args);
+
 static PyMethodDef CSearch_methods[] = {
     {"search", (PyCFunction)CSearch_search, METH_VARARGS,
      "search(game_state, max_depth, time_limit_ms=1000.0) -> ((from_sq, to_sq, promo, drop), score, nodes) or None"},
@@ -191,6 +199,26 @@ static PyMethodDef CSearch_methods[] = {
      "search_top_n(game_state, n, max_depth, time_limit_ms=1000.0) -> list of ((from_sq, to_sq, promo, drop), score)"},
     {"clear_tt", (PyCFunction)CSearch_clear_tt, METH_NOARGS,
      "Clear the transposition table."},
+    {"search_cnative_chess", (PyCFunction)CSearch_search_cnative_chess, METH_VARARGS,
+     "search_cnative_chess(board_bytes, side, castling, ep_sq, halfmove, "
+     "wk_sq, bk_sq, history_bytes, max_depth, time_limit_ms, n_threads=1) "
+     "-> ((from, to, promo_or_None), score, nodes) or None. "
+     "C-native multi-threaded (Lazy SMP) NNUE search. max_depth=0 or "
+     "time_limit_ms=0 means infinite; caller must use stop_event."},
+    {"search_cnative_shogi", (PyCFunction)CSearch_search_cnative_shogi, METH_VARARGS,
+     "search_cnative_shogi(board_bytes, sente_hand, gote_hand, side, "
+     "history_bytes, max_depth, time_limit_ms, n_threads=1) "
+     "-> ((from, to, promo, drop), score, nodes) or None."},
+    {"search_cnative_live_chess", (PyCFunction)CSearch_search_cnative_live_chess, METH_VARARGS,
+     "search_cnative_live_chess(board_bytes, side, castling, ep_sq, halfmove, "
+     "wk_sq, bk_sq, history_bytes, max_depth, time_limit_ms, n_threads, "
+     "live_ref, stop_event) -> final result tuple or None. "
+     "Publishes (depth, max_depth, top_moves, done) to live_ref[0] and "
+     "polls stop_event.is_set() to abort."},
+    {"search_cnative_live_shogi", (PyCFunction)CSearch_search_cnative_live_shogi, METH_VARARGS,
+     "search_cnative_live_shogi(board_bytes, sente_hand, gote_hand, side, "
+     "history_bytes, max_depth, time_limit_ms, n_threads, "
+     "live_ref, stop_event) -> final result tuple or None."},
     {NULL}
 };
 

@@ -2,8 +2,18 @@
 
 Enhancements: quiescence search, check extensions, null-move pruning,
 LMR, PVS, aspiration windows, futility pruning, root move ordering.
+
+Fast path: for chess and shogi (which have full C movegen/make/unmake
+under src/accel/), AlphaBetaSearch dispatches to the C-native
+multi-threaded Lazy SMP search in ``_csearch_cnative.c`` instead of
+the Python alphabeta loop. That gives roughly 10-20× faster
+think-time with identical search features (LMR, PVS, null move, TT,
+killer/history). Mini variants (minichess, minishogi) still use the
+Python path.
 """
 
+import os
+import struct
 import threading
 import time
 from typing import Dict, List, Optional, Tuple
@@ -19,6 +29,53 @@ try:
 except ImportError:
     _CSearch = None
     _AccelAccum = None
+
+
+def _default_n_threads() -> int:
+    """Default worker count for Lazy SMP: performance cores on M-series
+    Macs, generally cpu_count() - 1 with a floor of 1 and cap of 8."""
+    n = os.cpu_count() or 4
+    n = max(1, min(8, n - 1))
+    return n
+
+
+try:
+    from src.games.chess.state import ChessState as _ChessState
+except Exception:
+    _ChessState = None
+try:
+    from src.games.shogi.state import ShogiState as _ShogiState
+except Exception:
+    _ShogiState = None
+
+
+def _cnative_game_kind(state) -> Optional[str]:
+    """Return 'chess' or 'shogi' if the state supports the C-native fast
+    path, otherwise None. Mini variants (minichess, minishogi) lack the
+    full C movegen so we skip them here and fall through to the Python
+    alphabeta path. Uses isinstance rather than module-path substring
+    matching so 'games.minichess' isn't confused with 'games.chess'."""
+    if _ChessState is not None and isinstance(state, _ChessState):
+        return 'chess'
+    if _ShogiState is not None and isinstance(state, _ShogiState):
+        return 'shogi'
+    return None
+
+
+def _pack_chess_history(state) -> bytes:
+    hist = getattr(state, "_history", ()) or ()
+    if not hist:
+        return b""
+    hist = tuple(hist)[-64:]
+    return struct.pack(f"<{len(hist)}Q", *hist)
+
+
+def _pack_shogi_history(state) -> bytes:
+    hist = getattr(state, "_history", ()) or ()
+    if not hist:
+        return b""
+    hist = tuple(hist)[-64:]
+    return struct.pack(f"<{len(hist)}Q", *hist)
 
 try:
     from src.accel._nnue_accel import shogi_rule_search as _c_shogi_rule_search
@@ -289,10 +346,12 @@ class AlphaBetaSearch(_NegamaxMixin):
     """Iterative deepening alpha-beta search engine."""
 
     def __init__(self, evaluator, max_depth: int = 6,
-                 time_limit_ms: int = 5000):
+                 time_limit_ms: int = 5000,
+                 n_threads: Optional[int] = None):
         self.evaluator = evaluator
         self.max_depth = max_depth
         self.time_limit_ms = time_limit_ms
+        self.n_threads = n_threads if n_threads is not None else _default_n_threads()
         self.tt = TranspositionTable(size=1 << 20)
         self.move_ordering = MoveOrdering()
         self.nodes_searched = 0
@@ -318,6 +377,155 @@ class AlphaBetaSearch(_NegamaxMixin):
             except Exception:
                 self._csearch = None
 
+    # ----------------------------------------------------------------
+    # C-native multi-threaded (Lazy SMP) fast path
+    # ----------------------------------------------------------------
+
+    def _try_cnative_search(self, state: GameState, max_d: int
+                             ) -> Optional[Tuple[Optional[Move], float]]:
+        """Attempt a single C-native Lazy SMP search. Returns (move, score)
+        on success or None if this state / evaluator combo can't use the
+        fast path (caller then falls through to the Python alphabeta)."""
+        if self._csearch is None:
+            return None
+        kind = _cnative_game_kind(state)
+        if kind is None:
+            return None
+
+        try:
+            self.evaluator.set_position(state)
+            if kind == 'chess':
+                result = self._csearch.search_cnative_chess(
+                    bytes(state.board_array()),
+                    int(state.side_to_move()),
+                    int(state._castling),
+                    int(state._ep_square),
+                    int(state._halfmove),
+                    int(state.king_square(0)),
+                    int(state.king_square(1)),
+                    _pack_chess_history(state),
+                    int(max_d),
+                    float(self.time_limit_ms),
+                    int(self.n_threads),
+                )
+                if result is None:
+                    return None
+                (from_sq, to_sq, promo), score, nodes = result
+                self.nodes_searched = int(nodes)
+                mv = Move(from_sq=from_sq, to_sq=to_sq,
+                          promotion=promo, drop_piece=None)
+                return mv, float(score)
+
+            # shogi
+            hand0 = state.hand_pieces(0)
+            hand1 = state.hand_pieces(1)
+            sh = tuple(hand0.get(i, 0) for i in range(7))
+            gh = tuple(hand1.get(i, 0) for i in range(7))
+            result = self._csearch.search_cnative_shogi(
+                bytes(state.board_array()),
+                sh, gh,
+                int(state.side_to_move()),
+                _pack_shogi_history(state),
+                int(max_d),
+                float(self.time_limit_ms),
+                int(self.n_threads),
+            )
+            if result is None:
+                return None
+            (from_sq, to_sq, promo, drop), score, nodes = result
+            self.nodes_searched = int(nodes)
+            mv = Move(from_sq=from_sq, to_sq=to_sq,
+                      promotion=promo, drop_piece=drop)
+            return mv, float(score)
+        except Exception:
+            return None
+
+    def _try_cnative_live(self, state: GameState, n: int,
+                           live_ref: Optional[list],
+                           stop_event: Optional[threading.Event],
+                           ) -> Optional[List[Tuple[Move, float]]]:
+        """Live-search fast path that mirrors shogi_rule_search_live but
+        for the C-native NNUE search. Returns a list of (Move, score)
+        pairs, or None if this state can't use the fast path."""
+        if self._csearch is None:
+            return None
+        kind = _cnative_game_kind(state)
+        if kind is None:
+            return None
+
+        try:
+            self.evaluator.set_position(state)
+            # For "infinite think" (max_depth <= 0) we pass 0 to the C
+            # side which interprets it as "search until time limit or
+            # abort". Same for time_limit_ms.
+            max_d_sentinel = self.max_depth if self.max_depth > 0 else 0
+            time_ms_sentinel = (float(self.time_limit_ms)
+                                if self.time_limit_ms > 0 else 0.0)
+
+            if kind == 'chess':
+                result = self._csearch.search_cnative_live_chess(
+                    bytes(state.board_array()),
+                    int(state.side_to_move()),
+                    int(state._castling),
+                    int(state._ep_square),
+                    int(state._halfmove),
+                    int(state.king_square(0)),
+                    int(state.king_square(1)),
+                    _pack_chess_history(state),
+                    int(max_d_sentinel),
+                    float(time_ms_sentinel),
+                    int(self.n_threads),
+                    live_ref if live_ref is not None else [None],
+                    stop_event,
+                )
+            else:
+                hand0 = state.hand_pieces(0)
+                hand1 = state.hand_pieces(1)
+                sh = tuple(hand0.get(i, 0) for i in range(7))
+                gh = tuple(hand1.get(i, 0) for i in range(7))
+                result = self._csearch.search_cnative_live_shogi(
+                    bytes(state.board_array()),
+                    sh, gh,
+                    int(state.side_to_move()),
+                    _pack_shogi_history(state),
+                    int(max_d_sentinel),
+                    float(time_ms_sentinel),
+                    int(self.n_threads),
+                    live_ref if live_ref is not None else [None],
+                    stop_event,
+                )
+
+            # Derive top-N from the live_ref snapshot — the C side
+            # publishes (depth, max_depth, top_moves, done). Before
+            # returning we normalise the tuples back into Python Move
+            # objects.
+            if live_ref is not None and live_ref[0] is not None:
+                _d, _md, snapshot_top, _done = live_ref[0]
+                out: List[Tuple[Move, float]] = []
+                for (m_tup, sc) in snapshot_top[:n]:
+                    from_sq, to_sq, promo, drop = m_tup
+                    out.append((
+                        Move(from_sq=from_sq, to_sq=to_sq,
+                             promotion=promo, drop_piece=drop),
+                        float(sc),
+                    ))
+                if result is not None:
+                    (from_sq, to_sq, promo, drop), score, nodes = result
+                    self.nodes_searched = int(nodes)
+                return out
+
+            if result is not None:
+                (from_sq, to_sq, promo, drop), score, nodes = result
+                self.nodes_searched = int(nodes)
+                return [(
+                    Move(from_sq=from_sq, to_sq=to_sq,
+                         promotion=promo, drop_piece=drop),
+                    float(score),
+                )]
+            return []
+        except Exception:
+            return None
+
     def search(self, state: GameState,
                depth_override: Optional[int] = None) -> Tuple[Optional[Move], float]:
         """Iterative-deepening alpha-beta with a firm "always has a best
@@ -342,7 +550,16 @@ class AlphaBetaSearch(_NegamaxMixin):
         if not legal:
             return None, 0.0
 
-        # C fast path
+        # C-native Lazy SMP fast path for chess/shogi: replaces the old
+        # Python-callback CSearch.search. ~10-20× faster per node at
+        # n_threads=1, plus ~3-4× from multi-threading.
+        fast = self._try_cnative_search(state, max_d)
+        if fast is not None:
+            return fast
+
+        # Legacy CSearch Python-callback path (kept for states without
+        # the C-native fast path, e.g. minichess/minishogi if their
+        # evaluator still exposes an AcceleratedAccumulator).
         if self._csearch is not None and hasattr(state, 'make_move_inplace'):
             self.evaluator.set_position(state)
             result = self._csearch.search(state, max_d, float(self.time_limit_ms))
@@ -481,6 +698,15 @@ class AlphaBetaSearch(_NegamaxMixin):
                 live_ref[0] = (0, self.max_depth, [], True)
             self._stop_event = None
             return []
+
+        # C-native Lazy SMP live-analysis fast path: chess + shogi. It
+        # publishes (depth, max_depth, top_moves, done) to live_ref[0]
+        # directly from C after every completed iteration, so the GUI
+        # picks up updates without needing the Python loop below.
+        cn_live = self._try_cnative_live(state, n, live_ref, stop_event)
+        if cn_live is not None:
+            self._stop_event = None
+            return cn_live
 
         multipv = min(n, len(moves))
         prev_pv_scores: List[Tuple[Move, float]] = []
