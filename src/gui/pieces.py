@@ -88,8 +88,14 @@ class PieceRenderer:
 
     # ------------------------------------------------------------------ shogi
 
-    def render_shogi_piece(self, piece_code: int, is_mini: bool = False) -> pygame.Surface:
-        """Render a shogi piece as kanji on a pentagonal tile."""
+    def render_shogi_piece(self, piece_code: int, is_mini: bool = False,
+                           flipped_board: bool = False) -> pygame.Surface:
+        """Render a shogi piece as kanji on a pentagonal tile.
+
+        ``flipped_board`` rotates pieces so the player viewing from
+        gote's side still sees their own pieces pointing "away" from
+        them (pentagonal tip toward the opponent).
+        """
         abs_code = abs(piece_code)
         is_sente = piece_code > 0
         lookup = MINISHOGI_KANJI if is_mini else SHOGI_KANJI
@@ -101,7 +107,8 @@ class PieceRenderer:
         else:
             bg, fg = _GOTE_BG, (_GOTE_PROMOTED if is_promoted else _GOTE_FG)
 
-        return self._kanji_on_tile(char, bg, fg, flip=not is_sente)
+        flip = (not is_sente) ^ flipped_board
+        return self._kanji_on_tile(char, bg, fg, flip=flip)
 
     def _kanji_on_tile(self, char: str, bg, fg, flip: bool) -> pygame.Surface:
         size = self._piece_size

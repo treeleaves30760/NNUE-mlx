@@ -49,11 +49,13 @@ class MiniChessRenderer(BoardRenderer):
             file_color = self.theme.dark_sq if is_light_bottom else self.theme.light_sq
             rank_color = self.theme.dark_sq if is_light_left else self.theme.light_sq
 
-            label = font.render(files[i], True, file_color)
+            file_char = files[5 - i] if self.flipped else files[i]
+            label = font.render(file_char, True, file_color)
             x = i * self.square_size + self.square_size - 12
             y = self.board_pixel_h - 14
             surface.blit(label, (x, y))
 
-            label = font.render(str(i + 1), True, rank_color)
-            y = (5 - i) * self.square_size + 2
+            rank_num = (i + 1) if self.flipped else (6 - i)
+            label = font.render(str(rank_num), True, rank_color)
+            y = i * self.square_size + 2
             surface.blit(label, (2, y))

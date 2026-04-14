@@ -18,7 +18,14 @@ _HINT_COLORS = [
 
 
 class BoardRenderer(ABC):
-    """Base class for rendering a game board in pygame."""
+    """Base class for rendering a game board in pygame.
+
+    ``flipped`` rotates the display 180° — used to let the player view
+    the board from Black/gote's side without changing the underlying
+    game state. Subclasses use ``_display_rank``/``_display_file`` to
+    express their natural orientation; the base class composes that
+    with the flip flag in ``sq_to_pixel``/``pixel_to_sq``.
+    """
 
     def __init__(self, config: GameConfig, theme: Theme, square_size: int = 80):
         self.config = config
@@ -26,14 +33,20 @@ class BoardRenderer(ABC):
         self.square_size = square_size
         self.board_pixel_w = config.board_width * square_size
         self.board_pixel_h = config.board_height * square_size
+        self.flipped = False
+
+    def set_flipped(self, flipped: bool) -> None:
+        self.flipped = bool(flipped)
 
     def sq_to_pixel(self, sq: int) -> tuple:
         """Convert board square index to pixel coordinates (top-left of square)."""
         rank = sq // self.config.board_width
         file = sq % self.config.board_width
-        # Flip rank so rank 0 is at bottom for chess, top for shogi
         display_rank = self._display_rank(rank)
         display_file = self._display_file(file)
+        if self.flipped:
+            display_rank = self.config.board_height - 1 - display_rank
+            display_file = self.config.board_width - 1 - display_file
         x = display_file * self.square_size
         y = display_rank * self.square_size
         return (x, y)
@@ -44,6 +57,9 @@ class BoardRenderer(ABC):
             return None
         display_file = x // self.square_size
         display_rank = y // self.square_size
+        if self.flipped:
+            display_rank = self.config.board_height - 1 - display_rank
+            display_file = self.config.board_width - 1 - display_file
         file = self._file_from_display(display_file)
         rank = self._rank_from_display(display_rank)
         if 0 <= rank < self.config.board_height and 0 <= file < self.config.board_width:

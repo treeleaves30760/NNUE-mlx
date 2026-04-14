@@ -46,19 +46,22 @@ class ChessRenderer(BoardRenderer):
         files = "abcdefgh"
         for i in range(8):
             # Pick color that contrasts with the square color
-            rank_for_file = 0  # bottom rank
             is_light_bottom = ((7 + i) % 2 == 0)
             is_light_left = ((7 - i + 0) % 2 == 0)
             file_color = self.theme.dark_sq if is_light_bottom else self.theme.light_sq
             rank_color = self.theme.dark_sq if is_light_left else self.theme.light_sq
 
-            # File labels in bottom-right of each bottom-row square
-            label = font.render(files[i], True, file_color)
+            # File labels in bottom-right of each bottom-row square.
+            # When flipped, files run h..a instead of a..h.
+            file_char = files[7 - i] if self.flipped else files[i]
+            label = font.render(file_char, True, file_color)
             x = i * self.square_size + self.square_size - 12
             y = self.board_pixel_h - 14
             surface.blit(label, (x, y))
 
-            # Rank labels in top-left of each left-column square
-            label = font.render(str(i + 1), True, rank_color)
-            y = (7 - i) * self.square_size + 2
+            # Rank labels in top-left of each left-column square.
+            # When flipped, top row shows rank 1 instead of rank 8.
+            rank_num = (i + 1) if self.flipped else (8 - i)
+            label = font.render(str(rank_num), True, rank_color)
+            y = i * self.square_size + 2
             surface.blit(label, (2, y))

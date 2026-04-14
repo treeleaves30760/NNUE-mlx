@@ -8,9 +8,21 @@ import pygame
 from src.games.base import GameState, WHITE, BLACK
 from src.gui._board_interaction import _BoardInteractionMixin
 from src.gui.analysis import AnalysisController
-from src.gui.constants import BG, DEPTH_MAX
+from src.gui.constants import BG, BG_GRAD_TOP, BG_GRAD_BOTTOM, DEPTH_MAX
 from src.gui.panel import draw_panel, eval_white_pov
 from src.utils.config import create_game
+
+
+def _make_bg_surface(w: int, h: int) -> pygame.Surface:
+    """Cached vertical-gradient background for the game view."""
+    surf = pygame.Surface((w, h))
+    for i in range(h):
+        t = i / max(1, h - 1)
+        r = int(BG_GRAD_TOP[0] * (1 - t) + BG_GRAD_BOTTOM[0] * t)
+        g = int(BG_GRAD_TOP[1] * (1 - t) + BG_GRAD_BOTTOM[1] * t)
+        b = int(BG_GRAD_TOP[2] * (1 - t) + BG_GRAD_BOTTOM[2] * t)
+        pygame.draw.line(surf, (r, g, b), (0, i), (w, i))
+    return surf
 
 
 class GameSession(_BoardInteractionMixin):
@@ -22,19 +34,34 @@ class GameSession(_BoardInteractionMixin):
         self.renderer = app._create_renderer(app.game_name)
         self.has_hand = self.state.config().has_drops
 
-        # AI
+        # AI — in HvAI, the AI plays whichever side the human did *not* pick.
         self.ai_searcher = None
         self.ai_searcher_2 = None
-        self.ai_side = BLACK
+        if app.mode == "human-vs-ai":
+            self.ai_side = BLACK if app.player_side_int == WHITE else WHITE
+        else:
+            self.ai_side = BLACK  # unused in HvH/AvA
         self.ai_thinking = False
         self.ai_result: list = [None]
+
+        # Board orientation. In HvAI, auto-flip so the player's pieces
+        # sit at the bottom. In HvH, start unflipped; use the panel's
+        # flip button to toggle.
+        if app.mode == "human-vs-ai" and app.player_side_int == BLACK:
+            self.renderer.set_flipped(True)
 
         # Board interaction
         self.selected_sq: Optional[int] = None
         self.legal_targets: List[int] = []
         self.selected_hand_piece: Optional[int] = None
         self.status_text = ""
-        self.score_history: List[float] = [eval_white_pov(self.state)]
+
+        # Stable score history: always in pawn units, always from White's POV.
+        # Entries are None until analysis produces a committed eval for that
+        # ply; the eval bar and chart skip None values so nothing jumps when a
+        # ply is pending. The starting ply gets a material-only seed so the
+        # chart has something to draw before analysis commits.
+        self.score_history: List[Optional[float]] = [eval_white_pov(self.state)]
 
         # Analysis: the controller owns worker lifecycle and commit logic.
         # hint_* fields are the display-facing mirror of controller.committed,
@@ -50,26 +77,52 @@ class GameSession(_BoardInteractionMixin):
         # Panel clickable rects (populated after first draw)
         self.panel_rects: Dict[str, pygame.Rect] = {}
 
-        # Layout
-        self.board_x = 30
+        # Layout — leave room on the left for the eval bar.
+        self.eval_bar_w = 36
+        self.eval_bar_gap = 12
+        self.board_x = 24 + self.eval_bar_w + self.eval_bar_gap
         if self.has_hand:
             hand_h, hand_gap = 50, 5
-            self.gote_hand_rect = pygame.Rect(
+            self.top_hand_rect = pygame.Rect(
                 self.board_x, 30, self.renderer.board_pixel_w, hand_h)
             self.board_y = 30 + hand_h + hand_gap
-            self.sente_hand_rect = pygame.Rect(
+            self.bottom_hand_rect = pygame.Rect(
                 self.board_x,
                 self.board_y + self.renderer.board_pixel_h + hand_gap,
                 self.renderer.board_pixel_w, hand_h)
         else:
             self.board_y = 30
-            self.gote_hand_rect = None
-            self.sente_hand_rect = None
+            self.top_hand_rect = None
+            self.bottom_hand_rect = None
         self.panel_x = self.board_x + self.renderer.board_pixel_w + 20
-        self.panel_w = app.W - self.panel_x - 10
+        self.panel_w = app.W - self.panel_x - 16
+        self.eval_bar_rect = pygame.Rect(
+            24, self.board_y, self.eval_bar_w,
+            self.renderer.board_pixel_h)
+
+        self._bg_surface = _make_bg_surface(app.W, app.H)
 
         if app.mode in ("human-vs-ai", "ai-vs-ai"):
             self._ensure_ai()
+
+    # -------------------------------------------------- Side orientation
+    # In shogi variants the "bottom hand rect" always holds the pieces of
+    # the side sitting at the bottom of the (possibly flipped) board. We
+    # expose helpers so click routing and hint rendering stay consistent.
+
+    def _bottom_side(self) -> int:
+        """Which colour sits at the visual bottom of the board."""
+        return BLACK if self.renderer.flipped else WHITE
+
+    def _top_side(self) -> int:
+        return WHITE if self.renderer.flipped else BLACK
+
+    def _hand_rect_for_side(self, side: int) -> Optional[pygame.Rect]:
+        if not self.has_hand:
+            return None
+        return (self.bottom_hand_rect
+                if side == self._bottom_side()
+                else self.top_hand_rect)
 
     # -------------------------------------------------- AI management
     def _ensure_ai(self):
@@ -94,21 +147,11 @@ class GameSession(_BoardInteractionMixin):
         self.analysis.launch(self.state)
 
     def _build_analysis_search(self, state: GameState):
-        """Factory used by AnalysisController to build a search engine.
-
-        Returns ``None`` when analysis should be suppressed for the given
-        state — e.g. when it's the AI's turn in human-vs-AI mode, where
-        the AI searcher already owns the thinking budget. The controller
-        treats ``None`` as "leave committed state empty, spawn no worker".
-        """
+        """Factory used by AnalysisController to build a search engine."""
         if (self.app.mode == "human-vs-ai"
                 and state.side_to_move() == self.ai_side):
             return None
 
-        # Shogi without an NNUE model: use the C-backed rule search in
-        # infinite-depth mode so the GUI keeps deepening until cancelled.
-        # Everything else goes through the Python AlphaBetaSearch with
-        # whichever evaluator the app configured.
         if self.app.game_name == "shogi" and not self.app.model_path:
             from src.search.alphabeta import create_rule_based_search
             return create_rule_based_search(
@@ -123,7 +166,7 @@ class GameSession(_BoardInteractionMixin):
             evaluator, max_depth=DEPTH_MAX, time_limit_ms=600_000,
         )
 
-    # -------------------------------------------------- Restart
+    # -------------------------------------------------- Restart / flip
     def _restart(self):
         self.state = create_game(self.app.game_name)
         self.score_history = [eval_white_pov(self.state)]
@@ -136,6 +179,13 @@ class GameSession(_BoardInteractionMixin):
         self.status_text = ""
         if self.app.analysis_on:
             self._launch_analysis()
+
+    def _toggle_flip(self):
+        """Flip the board orientation. Cancels any click selection."""
+        self.renderer.set_flipped(not self.renderer.flipped)
+        self.selected_sq = None
+        self.legal_targets = []
+        self.selected_hand_piece = None
 
     # -------------------------------------------------- Events
     def _handle_events(self) -> Optional[str]:
@@ -163,9 +213,9 @@ class GameSession(_BoardInteractionMixin):
         if key == pygame.K_r:
             self._restart()
         if key == pygame.K_h:
-            # Flip the toggle; _update_analysis handles both launch and
-            # teardown based on app.analysis_on in the same frame.
             self.app.analysis_on = not self.app.analysis_on
+        if key == pygame.K_f:
+            self._toggle_flip()
         return None
 
     # -------------------------------------------------- Update
@@ -212,27 +262,32 @@ class GameSession(_BoardInteractionMixin):
                 or self.app.mode == "ai-vs-ai"
             )
             if still_ai and move is not None:
+                # Record the AI's post-move eval from White's POV before
+                # transitioning to the new position. The engine reports
+                # ``score`` in centipawns from the mover's POV.
+                mover_was_white = (self.state.side_to_move() == WHITE)
+                white_cp = score if mover_was_white else -score
                 self.state = self.state.make_move(move)
-                self.score_history.append(eval_white_pov(self.state))
+                self._append_score_pending()
+                self._commit_score(white_cp / 100.0)
                 self.hint_moves = []
                 self.status_text = f"AI: {move} (score: {score:.0f})"
             elif move is None:
                 self.status_text = "AI: no move found"
 
-    def _update_analysis(self):
-        """Drive the analysis controller and mirror its committed state.
+    def _append_score_pending(self) -> None:
+        """Add a pending slot for the new ply (filled when analysis commits)."""
+        self.score_history.append(None)
 
-        Runs every frame. Responsibilities (in order):
-          1. If analysis is off, tear down any running worker and clear
-             the display mirror so stale hints don't linger.
-          2. If the controller is running for a different state object
-             (because the player or AI just moved), relaunch it for the
-             current position.
-          3. Ingest the latest live snapshot; if that produces a *fresh*
-             first commit for this ply, seed the score chart once.
-          4. Mirror ``controller.committed`` onto ``hint_*`` fields so
-             the draw path has simple, stable data to render.
-        """
+    def _commit_score(self, white_pawns: float) -> None:
+        """Write ``white_pawns`` into the most recent ply slot."""
+        if not self.score_history:
+            self.score_history.append(white_pawns)
+            return
+        self.score_history[-1] = white_pawns
+
+    def _update_analysis(self):
+        """Drive the analysis controller and mirror its committed state."""
         if not self.app.analysis_on:
             if self.analysis.committed is not None or self.hint_moves:
                 self.analysis.cancel()
@@ -245,13 +300,11 @@ class GameSession(_BoardInteractionMixin):
             return
 
         fresh_commit = self.analysis.update(self.state)
-        if fresh_commit is not None and self.score_history:
-            # First commit of this ply: replace the material-only seed
-            # at score_history[-1] with the deep-search evaluation.
-            white_score = (fresh_commit.best_score
-                           if self.state.side_to_move() == WHITE
-                           else -fresh_commit.best_score)
-            self.score_history[-1] = white_score / 100.0
+        if fresh_commit is not None:
+            white_cp = (fresh_commit.best_score
+                        if self.state.side_to_move() == WHITE
+                        else -fresh_commit.best_score)
+            self._commit_score(white_cp / 100.0)
 
         committed = self.analysis.committed
         if committed is None:
@@ -284,17 +337,27 @@ class GameSession(_BoardInteractionMixin):
         else:
             self.status_text = "Draw!"
 
+    def _current_white_eval(self) -> Optional[float]:
+        """Latest committed White-POV eval in pawn units, if any."""
+        for s in reversed(self.score_history):
+            if s is not None:
+                return s
+        return None
+
     # -------------------------------------------------- Draw
 
     def _draw(self):
         screen = self.app.screen
-        screen.fill(BG)
+        screen.blit(self._bg_surface, (0, 0))
 
         if self.has_hand:
+            # Bottom rect shows the side sitting at the visual bottom.
             self.renderer.draw_hand(
-                screen, self.state, BLACK, self.gote_hand_rect)
+                screen, self.state, self._bottom_side(),
+                self.bottom_hand_rect)
             self.renderer.draw_hand(
-                screen, self.state, WHITE, self.sente_hand_rect)
+                screen, self.state, self._top_side(),
+                self.top_hand_rect)
 
         bsurf = pygame.Surface(
             (self.renderer.board_pixel_w, self.renderer.board_pixel_h))
@@ -308,7 +371,16 @@ class GameSession(_BoardInteractionMixin):
             self.renderer.draw_drop_hints(
                 screen, self.hint_moves, self.state,
                 (self.board_x, self.board_y),
-                self.sente_hand_rect, self.gote_hand_rect)
+                self._hand_rect_for_side(WHITE),
+                self._hand_rect_for_side(BLACK))
+
+        # Eval bar (White's POV)
+        from src.gui.widgets import draw_eval_bar
+        draw_eval_bar(
+            screen, self.eval_bar_rect,
+            self._current_white_eval() or 0.0,
+            self.renderer.flipped, self.app.small_font,
+        )
 
         self.panel_rects = draw_panel(
             self.app, self.panel_x, 30, self.panel_w,
@@ -316,6 +388,11 @@ class GameSession(_BoardInteractionMixin):
             self.status_text, self.app.analysis_on,
             self.hint_depth, self.hint_done, self.score_history,
             hint_max_depth=self.hint_max_depth,
+            white_eval=self._current_white_eval(),
+            flipped=self.renderer.flipped,
+            can_flip=(self.app.mode == "human-vs-human"),
+            player_side_int=self.app.player_side_int,
+            mode=self.app.mode,
         )
         pygame.display.flip()
 

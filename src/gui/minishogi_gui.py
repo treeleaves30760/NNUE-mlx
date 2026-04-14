@@ -54,7 +54,8 @@ class MiniShogiRenderer(BoardRenderer):
             if piece == 0:
                 continue
             x, y = self.sq_to_pixel(sq)
-            piece_surf = self.piece_renderer.render_shogi_piece(piece, is_mini=True)
+            piece_surf = self.piece_renderer.render_shogi_piece(
+                piece, is_mini=True, flipped_board=self.flipped)
             px = x + (self.square_size - piece_surf.get_width()) // 2
             py = y + (self.square_size - piece_surf.get_height()) // 2
             surface.blit(piece_surf, (px, py))
@@ -62,13 +63,14 @@ class MiniShogiRenderer(BoardRenderer):
     def _draw_coordinates(self, surface: pygame.Surface):
         font = pygame.font.SysFont("Arial", 12)
         for i in range(5):
-            file_num = 5 - i
+            file_num = (i + 1) if self.flipped else (5 - i)
             label = font.render(str(file_num), True, (80, 80, 80))
             x = i * self.square_size + self.square_size // 2 - 4
             surface.blit(label, (x, -2))
         ranks = "abcde"
         for i in range(5):
-            label = font.render(ranks[i], True, (80, 80, 80))
+            idx = (4 - i) if self.flipped else i
+            label = font.render(ranks[idx], True, (80, 80, 80))
             x = self.board_pixel_w + 2
             y = i * self.square_size + self.square_size // 2 - 6
             surface.blit(label, (x, y))
@@ -100,7 +102,8 @@ class MiniShogiRenderer(BoardRenderer):
             x = area_rect.x + start_x + i * (tile_sz + spacing)
             y = area_rect.y + tile_y
             code = (pt + 1) if side == WHITE else -(pt + 1)
-            tile = self.hand_renderer.render_shogi_piece(code, is_mini=True)
+            tile = self.hand_renderer.render_shogi_piece(
+                code, is_mini=True, flipped_board=self.flipped)
             surface.blit(tile, (x, y))
             if count > 1:
                 txt = count_font.render(str(count), True, (255, 255, 255))

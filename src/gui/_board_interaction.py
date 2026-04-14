@@ -26,6 +26,8 @@ class _BoardInteractionMixin:
             elif key == "menu":
                 self._cancel_analysis()
                 return "menu"
+            elif key == "flip":
+                self._toggle_flip()
             return None
 
         # Guard: not interactable
@@ -43,11 +45,11 @@ class _BoardInteractionMixin:
         return None
 
     def _handle_board_click(self, mx, my):
-        # Hand piece click (shogi)
+        # Hand piece click (shogi). The player can only grab from their
+        # own hand; resolve which rect to check from the side-to-move.
         if self.has_hand and self.selected_sq is None:
             side = self.state.side_to_move()
-            hr = (self.sente_hand_rect if side == WHITE
-                  else self.gote_hand_rect)
+            hr = self._hand_rect_for_side(side)
             if hr and hr.collidepoint(mx, my):
                 hp = self.renderer.hand_piece_at(
                     mx - hr.x, my - hr.y, self.state, side, hr)
@@ -70,10 +72,7 @@ class _BoardInteractionMixin:
                 for m in self.state.legal_moves():
                     if (m.drop_piece == self.selected_hand_piece
                             and m.to_sq == clicked_sq):
-                        self.state = self.state.make_move(m)
-                        self.score_history.append(
-                            eval_white_pov(self.state))
-                        self.hint_moves = []
+                        self._apply_move(m)
                         break
             self.selected_hand_piece = None
             self.selected_sq = None
@@ -102,14 +101,10 @@ class _BoardInteractionMixin:
                         if m.from_sq == self.selected_sq
                         and m.to_sq == clicked_sq]
             if len(matching) == 1:
-                self.state = self.state.make_move(matching[0])
-                self.score_history.append(eval_white_pov(self.state))
+                self._apply_move(matching[0])
             elif len(matching) > 1:
                 promo = [m for m in matching if m.promotion is not None]
-                self.state = self.state.make_move(
-                    promo[0] if promo else matching[0])
-                self.score_history.append(eval_white_pov(self.state))
-            self.hint_moves = []
+                self._apply_move(promo[0] if promo else matching[0])
             self.selected_sq = None
             self.legal_targets = []
         else:
@@ -118,3 +113,19 @@ class _BoardInteractionMixin:
                 m.to_sq for m in self.state.legal_moves()
                 if m.from_sq == clicked_sq
             ]
+
+    def _apply_move(self, move):
+        """Apply a human move and start a new score slot.
+
+        The slot starts as ``None`` so the eval bar/chart don't show a
+        stale value from the previous ply; it gets filled in when the
+        analysis controller commits the first deep-search snapshot. If
+        analysis is off we fall back to the material seed so the chart
+        still has a line to draw.
+        """
+        self.state = self.state.make_move(move)
+        if self.app.analysis_on:
+            self._append_score_pending()
+        else:
+            self.score_history.append(eval_white_pov(self.state))
+        self.hint_moves = []

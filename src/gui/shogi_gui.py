@@ -49,17 +49,22 @@ class ShogiRenderer(BoardRenderer):
             y = i * self.square_size
             pygame.draw.line(surface, (0, 0, 0), (0, y),
                              (self.board_pixel_w, y), 1)
-        # Star points (hoshi)
+        # Star points (hoshi) - use sq_to_pixel so flipping is handled
         for r, f in [(2, 2), (2, 5), (2, 8), (5, 2), (5, 5), (5, 8),
-                      (8, 2), (8, 5), (8, 8)]:
+                     (8, 2), (8, 5), (8, 8)]:
             if r < 9 and f < 9:
-                dr = self._display_rank(r)
-                df = self._display_file(f)
-                cx = df * self.square_size + self.square_size
-                cy = dr * self.square_size + self.square_size
-                # Adjust to be at grid intersection
-                cx = (self.config.board_width - 1 - f) * self.square_size + self.square_size
-                cy = r * self.square_size + self.square_size
+                # The hoshi sit on grid intersections between ranks/files.
+                # Use sq_to_pixel to find the square's top-left, then the
+                # grid intersection is at the square's top-left corner.
+                # Internal (r, f) hoshi sits at intersection between squares
+                # (r, f) and (r-1, f+1) (for right-to-left files).
+                x, y = self.sq_to_pixel(r * 9 + f)
+                if self.flipped:
+                    cx = x + self.square_size
+                    cy = y + self.square_size
+                else:
+                    cx = x + self.square_size
+                    cy = y + self.square_size
                 pygame.draw.circle(surface, (0, 0, 0), (cx, cy), 3)
 
     def _draw_pieces(self, surface: pygame.Surface, state: GameState):
@@ -69,23 +74,32 @@ class ShogiRenderer(BoardRenderer):
             if piece == 0:
                 continue
             x, y = self.sq_to_pixel(sq)
-            piece_surf = self.piece_renderer.render_shogi_piece(piece, is_mini=False)
+            # When the board is flipped, rotate the piece tile too so
+            # the player sees their own pieces "right side up" from their
+            # side of the board.
+            piece_surf = self.piece_renderer.render_shogi_piece(
+                piece, is_mini=False, flipped_board=self.flipped)
             px = x + (self.square_size - piece_surf.get_width()) // 2
             py = y + (self.square_size - piece_surf.get_height()) // 2
             surface.blit(piece_surf, (px, py))
 
     def _draw_coordinates(self, surface: pygame.Surface):
         font = pygame.font.SysFont("Arial", 12)
-        # File numbers 9-1 from left to right
+        # File numbers: when not flipped, 9-1 from left to right.
+        # When flipped (viewing from Black's side), 1-9 from left to right.
         for i in range(9):
-            file_num = 9 - i
+            if self.flipped:
+                file_num = i + 1
+            else:
+                file_num = 9 - i
             label = font.render(str(file_num), True, (80, 80, 80))
             x = i * self.square_size + self.square_size // 2 - 4
             surface.blit(label, (x, -2))
-        # Rank labels a-i
+        # Rank labels a-i (top to bottom); reversed when flipped.
         ranks = "abcdefghi"
         for i in range(9):
-            label = font.render(ranks[i], True, (80, 80, 80))
+            idx = (8 - i) if self.flipped else i
+            label = font.render(ranks[idx], True, (80, 80, 80))
             x = self.board_pixel_w + 2
             y = i * self.square_size + self.square_size // 2 - 6
             surface.blit(label, (x, y))
@@ -119,7 +133,8 @@ class ShogiRenderer(BoardRenderer):
             x = area_rect.x + start_x + i * (tile_sz + spacing)
             y = area_rect.y + tile_y
             code = (pt + 1) if side == WHITE else -(pt + 1)
-            tile = self.hand_renderer.render_shogi_piece(code, is_mini=False)
+            tile = self.hand_renderer.render_shogi_piece(
+                code, is_mini=False, flipped_board=self.flipped)
             surface.blit(tile, (x, y))
             if count > 1:
                 txt = count_font.render(str(count), True, (255, 255, 255))
