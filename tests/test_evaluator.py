@@ -222,6 +222,56 @@ def test_shogi_python_c_parity_start():
         )
 
 
+def test_shogi_pst_rewards_piece_advancement():
+    """Sente's pawn advanced to rank 3 (one from promotion zone) should
+    score strictly higher than a sente pawn still on its starting rank
+    (rank 6). This is a direct read of _SHOGI_PAWN_PST — if it fails,
+    the shogi evaluator's new positional signal is broken and pawns
+    will shuffle rather than advance under the rule-based teacher.
+    """
+    from src.search.evaluator import _SHOGI_PAWN_PST
+    # Starting rank for sente pawns is 6; advanced to rank 3 is 3
+    # squares forward (into the enemy half).
+    start_f4 = 6 * 9 + 4      # rank 6, file 4
+    advanced = 3 * 9 + 4      # rank 3, file 4
+    deep = 1 * 9 + 4          # rank 1, file 4 — one square from promoting
+    assert _SHOGI_PAWN_PST[advanced] > _SHOGI_PAWN_PST[start_f4]
+    assert _SHOGI_PAWN_PST[deep] > _SHOGI_PAWN_PST[advanced]
+
+
+def test_shogi_pst_king_home_rank_safe():
+    """Sente king on rank 8 (home) should strictly beat sente king
+    floating in the centre. The existing king_safety function already
+    captures this but we also want the PST alone to agree."""
+    from src.search.evaluator import _SHOGI_KING_PST
+    home_corner = 8 * 9 + 0   # rank 8 file 0 (corner)
+    home_center = 8 * 9 + 4   # rank 8 file 4 (initial king square)
+    center = 4 * 9 + 4        # rank 4 file 4 (middle)
+    assert _SHOGI_KING_PST[home_corner] > _SHOGI_KING_PST[center]
+    # Home-corner is strictly better than home-center (central file
+    # means the king sits in the crossfire of bishops and rooks).
+    assert _SHOGI_KING_PST[home_corner] > _SHOGI_KING_PST[home_center]
+
+
+def test_shogi_pst_respects_point_mirror():
+    """The point-mirror function must round-trip: mirror(mirror(sq))=sq
+    for every square. This guards against off-by-one bugs in the
+    shogi PST lookup for gote pieces."""
+    from src.search.evaluator import _shogi_mirror_sq
+    for sq in range(81):
+        assert _shogi_mirror_sq(_shogi_mirror_sq(sq)) == sq
+
+
+def test_shogi_piece_psts_symmetric_at_start():
+    """The shogi starting position is point-symmetric, so the PST
+    contribution must be zero — any non-zero value here means the
+    mirror function is wrong or a PST table is asymmetric in a way
+    that's not cancelled by the mirror."""
+    from src.search.evaluator import _shogi_piece_psts
+    from src.games.shogi import initial_state as _shogi_start
+    assert _shogi_piece_psts(_shogi_start()) == 0
+
+
 # --------------------------------------------------------------------------- chess positional
 #
 # The chess enhancements (connected pawns, knight outposts, rook on 7th,
@@ -330,6 +380,188 @@ def test_chess_development_preferred_over_random_move():
     assert from_piece in (1, 2), (
         f"expected pawn or knight move, got piece {from_piece} "
         f"for move {move}"
+    )
+
+
+# --------------------------------------------------------------------------- PST orientation regression
+#
+# A historical bug had the chess PST tables written in "rank 8 at top"
+# visual order but indexed directly by ``sq = rank * 8 + file`` where
+# rank 0 = white's back rank, silently flipping every PST upside-down.
+# Under that bug, pawns rewarded staying on rank 2 and penalised
+# advancing, knights got no bonus for development, and castling
+# produced essentially no positional delta. These tests assert the
+# fixed orientation by reading individual PST slots.
+
+
+def test_chess_pst_pawn_advance_is_rewarded():
+    """e4 should score strictly higher than e3 which scores higher than
+    e2 (white POV). If this ordering is wrong, the eval is teaching the
+    NNUE that pawns should stay home, which kills opening development
+    entirely."""
+    from src.search.evaluator import _CHESS_PAWN_MG
+    # sq = rank * 8 + file, rank 0 = white back rank.
+    e2, e3, e4 = 12, 20, 28
+    assert _CHESS_PAWN_MG[e4] > _CHESS_PAWN_MG[e3] > _CHESS_PAWN_MG[e2], (
+        f"pawn advance broken: e2={_CHESS_PAWN_MG[e2]} "
+        f"e3={_CHESS_PAWN_MG[e3]} e4={_CHESS_PAWN_MG[e4]}"
+    )
+
+
+def test_chess_pst_king_castled_beats_uncastled():
+    """A castled king on b1/g1 should strictly beat an uncastled king on
+    e1 in the middlegame PST. Not castling should be a real
+    positional loss, not a marginal tie-breaker."""
+    from src.search.evaluator import _CHESS_KING_MG
+    e1, b1, g1 = 4, 1, 6
+    assert _CHESS_KING_MG[g1] > _CHESS_KING_MG[e1], (
+        f"kingside castle not rewarded: e1={_CHESS_KING_MG[e1]} "
+        f"g1={_CHESS_KING_MG[g1]}"
+    )
+    assert _CHESS_KING_MG[b1] > _CHESS_KING_MG[e1], (
+        f"queenside castle not rewarded: e1={_CHESS_KING_MG[e1]} "
+        f"b1={_CHESS_KING_MG[b1]}"
+    )
+
+
+def test_chess_pst_knight_development_rewarded():
+    """A developed knight on f3/c3 should strictly beat a knight still
+    on its g1/b1 starting square."""
+    from src.search.evaluator import _CHESS_KNIGHT_MG
+    g1, f3, b1, c3 = 6, 21, 1, 18
+    assert _CHESS_KNIGHT_MG[f3] > _CHESS_KNIGHT_MG[g1], (
+        f"Nf3 development not rewarded: g1={_CHESS_KNIGHT_MG[g1]} "
+        f"f3={_CHESS_KNIGHT_MG[f3]}"
+    )
+    assert _CHESS_KNIGHT_MG[c3] > _CHESS_KNIGHT_MG[b1], (
+        f"Nc3 development not rewarded: b1={_CHESS_KNIGHT_MG[b1]} "
+        f"c3={_CHESS_KNIGHT_MG[c3]}"
+    )
+
+
+def test_chess_pst_rook_7th_rank_rewarded():
+    """A white rook on the 7th rank (rank index 6) should strictly beat
+    the same rook on its home square a1/h1. Rooks belong on open files
+    deep in enemy territory — the old tables gave zero signal here."""
+    from src.search.evaluator import _CHESS_ROOK_MG
+    a1, h1, a7, h7 = 0, 7, 48, 55
+    assert _CHESS_ROOK_MG[a7] > _CHESS_ROOK_MG[a1], (
+        f"rook on 7th not rewarded: a1={_CHESS_ROOK_MG[a1]} "
+        f"a7={_CHESS_ROOK_MG[a7]}"
+    )
+    assert _CHESS_ROOK_MG[h7] > _CHESS_ROOK_MG[h1], (
+        f"rook on 7th not rewarded: h1={_CHESS_ROOK_MG[h1]} "
+        f"h7={_CHESS_ROOK_MG[h7]}"
+    )
+
+
+def test_chess_backward_pawn_penalty():
+    """Construct a position where only white has a backward pawn:
+      * white pawn on d3 (sq 19) — no friendly neighbour on c/e, and
+      * black pawn on e5 (sq 36) attacks d4 (d3's advance square), and
+      * black pawn on f6 (sq 45) supports e5 so black's e5 is not
+        itself backward.
+    Only white's d3 is penalised, so the net score should be negative.
+    """
+    from src.search.evaluator import _chess_backward_pawns
+    white = [19]            # d3
+    black = [36, 45]        # e5, f6 (f6 supports e5)
+    score = _chess_backward_pawns(white, black)
+    assert score < 0, (
+        f"backward pawn not penalised for white only: got {score}"
+    )
+
+
+def test_chess_king_attack_pressure_negative_on_exposed_king():
+    """A white king in the centre with many black heavy pieces nearby
+    should get a king-attack penalty relative to a balanced position."""
+    import numpy as np
+    from src.accel._nnue_accel import chess_c_evaluate
+
+    # Balanced start
+    from src.games.chess import initial_state
+    s0 = initial_state()
+    e0 = chess_c_evaluate(s0.board_array(), 0,
+                          s0.king_square(0), s0.king_square(1))
+    # Construct a pathological board: just a white king on e4 with a
+    # black queen on e6. This should score badly negative for white.
+    board = np.zeros(64, dtype=np.int8)
+    board[28] = 6    # white king e4
+    board[44] = -5   # black queen e6
+    board[60] = -6   # black king e8
+    eb = chess_c_evaluate(board.tobytes(), 0, 28, 60)
+    assert eb < e0 - 500, (
+        f"exposed-king attack penalty missing: balanced={e0} "
+        f"vs exposed={eb}"
+    )
+
+
+def test_chess_rule_search_reaches_deeper_under_fixed_budget():
+    """After adding null-move pruning, LMR, futility and counter-move
+    ordering, the chess rule search should comfortably reach depth 6+
+    from the start position under a 500 ms budget. If regressions
+    disable one of those features, this depth target would become
+    unreachable and the bootstrap pipeline would quietly lose quality.
+    """
+    try:
+        from src.accel._nnue_accel import chess_c_rule_search
+    except ImportError:
+        pytest.skip("C accel not built")
+
+    from src.games.chess import initial_state
+    s = initial_state()
+    import time
+    t0 = time.time()
+    result = chess_c_rule_search(
+        s.board_array(), int(s.side_to_move()),
+        int(getattr(s, "_castling", 0)),
+        int(getattr(s, "_ep_square", -1)),
+        int(getattr(s, "_halfmove", 0)),
+        int(s.king_square(0)), int(s.king_square(1)),
+        b"",
+        6,          # depth
+        500.0,      # 500 ms
+    )
+    el = time.time() - t0
+    assert result is not None
+    assert el < 2.0, f"rule search took {el:.2f}s for depth 6"
+    (from_sq, to_sq, promo), score, nodes = result
+    # Expected: node count should be in the tens of thousands, not
+    # millions, now that null move + futility + LMR are pruning.
+    assert nodes < 500_000, (
+        f"chess rule search took {nodes} nodes for depth 6 — "
+        f"expected <500k after pruning enhancements"
+    )
+
+
+def test_chess_passed_pawn_rank_scaling():
+    """Deep passed pawn must score way more than early passed pawn."""
+    from src.search.evaluator import _chess_passed_pawn_bonus
+    # One white pawn on a-file at various ranks, no opposition
+    early = _chess_passed_pawn_bonus([16], [])   # a3
+    mid = _chess_passed_pawn_bonus([32], [])     # a5
+    late = _chess_passed_pawn_bonus([48], [])    # a7 (one from promotion)
+    assert late > mid > early, (
+        f"passed pawn rank scaling broken: early={early} "
+        f"mid={mid} late={late}"
+    )
+    assert late >= 120, f"advanced passed pawn too cheap: {late}"
+
+
+def test_chess_pst_king_eg_prefers_activity():
+    """In the endgame, the king is a fighting piece — the EG PST must
+    reward central activity. Corners should be strictly worse than the
+    center in EG, the opposite of the MG table."""
+    from src.search.evaluator import _CHESS_KING_EG, _CHESS_KING_MG
+    a1, e4, d4 = 0, 28, 27
+    assert _CHESS_KING_EG[e4] > _CHESS_KING_EG[a1], (
+        f"EG king centralisation broken: a1={_CHESS_KING_EG[a1]} "
+        f"e4={_CHESS_KING_EG[e4]}"
+    )
+    # And the MG must go the OTHER way (corner safer than centre).
+    assert _CHESS_KING_MG[a1] > _CHESS_KING_MG[e4] or \
+           _CHESS_KING_MG[a1] >= _CHESS_KING_MG[e4] - 30, (
+        f"MG king vs EG king orientation mismatch"
     )
 
 

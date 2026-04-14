@@ -279,6 +279,37 @@ def test_shogi_c_search_live_updates():
         "infinite-mode max_depth should exceed DEPTH_MAX so panel shows ∞"
 
 
+def test_shogi_rule_search_opening_no_spurious_mate():
+    """Guards against the mate-ply-adjustment bug that surfaced as
+    +99965 for every top move at the shogi opening in infinite mode.
+
+    Root cause: TT entries stored mate scores without the Stockfish
+    ply adjustment. Transpositions probed those entries at different
+    plies and returned a mate-class score for balanced positions.
+
+    We run the rule search far enough to exercise TT caching and
+    assert every reported score stays inside the normal eval range.
+    """
+    try:
+        from src.accel._nnue_accel import shogi_rule_search
+    except ImportError:
+        import pytest
+        pytest.skip("C accel not built")
+
+    from src.search.alphabeta import ShogiCRuleSearch
+    s = initial_state()
+    srch = ShogiCRuleSearch(max_depth=12, time_limit_ms=30000)
+    mv, sc = srch.search(s)
+    assert mv is not None
+    # Opening eval should be comfortably bounded; anything above ~20000
+    # means a mate-class score has leaked through the TT or the
+    # "no legal moves" branch.
+    assert abs(sc) < 30000, (
+        f"opening search returned {sc:+.0f}, expected normal-range eval "
+        f"(mate-score bug regression)"
+    )
+
+
 def test_shogi_create_rule_based_search_uses_c_path():
     """The factory must route shogi bootstraps to the C backend when built."""
     try:
