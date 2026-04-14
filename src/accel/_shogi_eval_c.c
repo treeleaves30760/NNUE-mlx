@@ -44,6 +44,181 @@ static const int8_t SH_EVAL_PIECE_ADVANCE[15] = {
     0, 2,                 /* Horse, Dragon */
 };
 
+/* ---- Per-piece PSTs (sente POV) --------------------------------------
+ *
+ * Must stay in lockstep with the _SHOGI_*_PST tables in evaluator.py.
+ * Gote pieces look up via the point-mirror (rotate 180°) defined in
+ * sh_mirror_sq, matching the shogi initial position's point-symmetry.
+ */
+
+static const int16_t SH_PAWN_PST[81] = {
+    72, 72, 72, 74, 74, 74, 72, 72, 72,
+    50, 50, 50, 52, 52, 52, 50, 50, 50,
+    32, 32, 32, 34, 34, 34, 32, 32, 32,
+    18, 18, 18, 20, 20, 20, 18, 18, 18,
+     8,  8,  8, 10, 10, 10,  8,  8,  8,
+     2,  2,  2,  4,  4,  4,  2,  2,  2,
+     0,  0,  0,  2,  2,  2,  0,  0,  0,
+     0,  0,  0,  2,  2,  2,  0,  0,  0,
+     0,  0,  0,  2,  2,  2,  0,  0,  0,
+};
+
+static const int16_t SH_LANCE_PST[81] = {
+    19, 19, 16, 16, 16, 16, 16, 19, 19,
+    17, 17, 14, 14, 14, 14, 14, 17, 17,
+    15, 15, 12, 12, 12, 12, 12, 15, 15,
+    13, 13, 10, 10, 10, 10, 10, 13, 13,
+    11, 11,  8,  8,  8,  8,  8, 11, 11,
+     9,  9,  6,  6,  6,  6,  6,  9,  9,
+     7,  7,  4,  4,  4,  4,  4,  7,  7,
+     5,  5,  2,  2,  2,  2,  2,  5,  5,
+     3,  3,  0,  0,  0,  0,  0,  3,  3,
+};
+
+static const int16_t SH_KNIGHT_PST[81] = {
+    22, 32, 40, 40, 40, 40, 40, 32, 22,
+    18, 28, 36, 36, 36, 36, 36, 28, 18,
+    14, 24, 32, 32, 32, 32, 32, 24, 14,
+    10, 20, 28, 28, 28, 28, 28, 20, 10,
+     6, 16, 24, 24, 24, 24, 24, 16,  6,
+     2, 12, 20, 20, 20, 20, 20, 12,  2,
+    -2,  8, 16, 16, 16, 16, 16,  8, -2,
+    -6,  4, 12, 12, 12, 12, 12,  4, -6,
+   -10,  0,  8,  8,  8,  8,  8,  0, -10,
+};
+
+static const int16_t SH_SILVER_PST[81] = {
+    24, 24, 29, 29, 29, 29, 29, 24, 24,
+    21, 21, 26, 26, 26, 26, 26, 21, 21,
+    18, 18, 23, 23, 23, 23, 23, 18, 18,
+    15, 15, 20, 20, 20, 20, 20, 15, 15,
+    12, 12, 17, 17, 17, 17, 17, 12, 12,
+     9,  9, 14, 14, 14, 14, 14,  9,  9,
+     6,  6, 11, 11, 11, 11, 11,  6,  6,
+     3,  3,  8,  8,  8,  8,  8,  3,  3,
+     0,  0,  5,  5,  5,  5,  5,  0,  0,
+};
+
+static const int16_t SH_GOLD_PST[81] = {
+     10,   10,   10,   13,   13,   13,   10,   10,   10,
+     15,   15,   15,   18,   18,   18,   15,   15,   15,
+      5,    5,    5,    8,    8,    8,    5,    5,    5,
+      6,    6,    6,    9,    9,    9,    6,    6,    6,
+      8,    8,    8,   11,   11,   11,    8,    8,    8,
+     10,   10,   10,   13,   13,   13,   10,   10,   10,
+     12,   12,   12,   15,   15,   15,   12,   12,   12,
+     14,   14,   14,   17,   17,   17,   14,   14,   14,
+     16,   16,   16,   19,   19,   19,   16,   16,   16,
+};
+
+static const int16_t SH_BISHOP_PST[81] = {
+      5,    3,    6,    9,   12,    9,    6,    3,    5,
+      3,   11,    9,   12,   15,   12,    9,   11,    3,
+      6,    9,   17,   15,   18,   15,   17,    9,    6,
+      9,   12,   15,   23,   21,   23,   15,   12,    9,
+     12,   15,   18,   21,   29,   21,   18,   15,   12,
+      9,   12,   15,   23,   21,   23,   15,   12,    9,
+      6,    9,   17,   15,   18,   15,   17,    9,    6,
+      3,   11,    9,   12,   15,   12,    9,   11,    3,
+      5,    3,    6,    9,   12,    9,    6,    3,    5,
+};
+
+static const int16_t SH_ROOK_PST[81] = {
+     40,   40,   40,   40,   40,   40,   40,   43,   40,
+     35,   35,   35,   35,   35,   35,   35,   38,   35,
+     30,   30,   30,   30,   30,   30,   30,   33,   30,
+     10,   10,   10,   10,   10,   10,   10,   13,   10,
+     10,   10,   10,   10,   10,   10,   10,   13,   10,
+     10,   10,   10,   10,   10,   10,   10,   13,   10,
+     10,   10,   10,   10,   10,   10,   10,   13,   10,
+      5,    5,    5,    5,    5,    5,    5,    8,    5,
+      0,    0,    0,    0,    0,    0,    0,    3,    0,
+};
+
+static const int16_t SH_KING_PST[81] = {
+    -90, -100, -105, -135, -135, -135, -105, -100,  -90,
+    -75,  -85,  -90, -120, -120, -120,  -90,  -85,  -75,
+    -60,  -70,  -75, -105, -105, -105,  -75,  -70,  -60,
+    -45,  -55,  -60,  -90,  -90,  -90,  -60,  -55,  -45,
+    -30,  -40,  -45,  -75,  -75,  -75,  -45,  -40,  -30,
+    -15,  -25,  -30,  -60,  -60,  -60,  -30,  -25,  -15,
+     -5,  -15,  -20,  -50,  -50,  -50,  -20,  -15,   -5,
+     20,   10,    5,  -25,  -25,  -25,    5,   10,   20,
+     30,   20,   15,  -15,  -15,  -15,   15,   20,   30,
+};
+
+static const int16_t SH_HORSE_PST[81] = {
+     24,   16,   16,   16,   16,   16,   16,   16,   24,
+     16,   28,   20,   20,   20,   20,   20,   28,   16,
+     16,   20,   32,   24,   24,   24,   32,   20,   16,
+     16,   20,   24,   36,   28,   36,   24,   20,   16,
+     16,   20,   24,   28,   40,   28,   24,   20,   16,
+     16,   20,   24,   36,   28,   36,   24,   20,   16,
+     16,   20,   32,   24,   24,   24,   32,   20,   16,
+     16,   28,   20,   20,   20,   20,   20,   28,   16,
+     24,   16,   16,   16,   16,   16,   16,   16,   24,
+};
+
+static const int16_t SH_DRAGON_PST[81] = {
+     40,   43,   46,   49,   52,   49,   46,   43,   40,
+     39,   39,   42,   45,   48,   45,   42,   39,   39,
+     38,   38,   38,   41,   44,   41,   38,   38,   38,
+     37,   37,   37,   37,   40,   37,   37,   37,   37,
+     27,   27,   27,   27,   27,   27,   27,   27,   27,
+     24,   24,   24,   24,   27,   24,   24,   24,   24,
+     21,   21,   21,   24,   27,   24,   21,   21,   21,
+     18,   18,   21,   24,   27,   24,   21,   18,   18,
+     15,   18,   21,   24,   27,   24,   21,   18,   15,
+};
+
+/* Map absolute piece code 1..14 to its PST. Promoted small pieces
+ * (+P/+L/+N/+S) all share the Gold table because they move like gold. */
+static const int16_t *sh_pst_for(int abs_p) {
+    switch (abs_p) {
+        case 1:  return SH_PAWN_PST;
+        case 2:  return SH_LANCE_PST;
+        case 3:  return SH_KNIGHT_PST;
+        case 4:  return SH_SILVER_PST;
+        case 5:  return SH_GOLD_PST;
+        case 6:  return SH_BISHOP_PST;
+        case 7:  return SH_ROOK_PST;
+        case 8:  return SH_KING_PST;
+        case 9:  return SH_GOLD_PST;   /* tokin */
+        case 10: return SH_GOLD_PST;   /* +lance */
+        case 11: return SH_GOLD_PST;   /* +knight */
+        case 12: return SH_GOLD_PST;   /* +silver */
+        case 13: return SH_HORSE_PST;
+        case 14: return SH_DRAGON_PST;
+    }
+    return NULL;
+}
+
+/* Point-mirror (180° rotation) for the sente-POV PSTs. Must match
+ * _shogi_mirror_sq in evaluator.py. */
+static inline int sh_mirror_sq(int sq) {
+    int r = sq / 9;
+    int f = sq % 9;
+    return (8 - r) * 9 + (8 - f);
+}
+
+static int32_t shogi_eval_piece_psts(const ShogiPosition *p) {
+    int32_t score = 0;
+    const int8_t *board = p->board;
+    for (int sq = 0; sq < SHOGI_SQUARES; sq++) {
+        int piece = board[sq];
+        if (piece == 0) continue;
+        int abs_p = piece > 0 ? piece : -piece;
+        const int16_t *pst = sh_pst_for(abs_p);
+        if (pst == NULL) continue;
+        if (piece > 0) {
+            score += pst[sq];
+        } else {
+            score -= pst[sh_mirror_sq(sq)];
+        }
+    }
+    return score;
+}
+
 /* ------------------------------------------------------------------------
  * _shogi_material: board material + advance + hand pieces (sente view).
  * ------------------------------------------------------------------------ */
@@ -326,6 +501,7 @@ static int32_t shogi_eval_rook_positional(const ShogiPosition *p) {
  * ------------------------------------------------------------------------ */
 int32_t shogi_rule_evaluate(const ShogiPosition *p) {
     int32_t score = shogi_eval_material(p)
+                  + shogi_eval_piece_psts(p)
                   + shogi_eval_king_safety(p)
                   + shogi_eval_rook_positional(p)
                   + shogi_eval_attack_cluster(p)

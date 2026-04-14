@@ -249,6 +249,191 @@ _SHOGI_PIECE_ADVANCE = [
     0, 6, 4, 7, 3, 1, 0, 3, 0, 2, 2, 2, 2, 0, 2,
 ]
 
+# --- Per-piece PSTs (sente POV) ------------------------------------------
+#
+# Indexing: ``sq = rank * 9 + file`` with rank 0 = gote's back rank and
+# rank 8 = sente's back rank. For sente pieces we look up ``pst[sq]``
+# directly; for gote pieces we mirror via :func:`_shogi_mirror_sq`.
+#
+# These tables supplement the existing advance bonus in ``_shogi_material``
+# — they encode PER-SQUARE preferences that aren't captured by pure
+# rank distance. Every promoted small piece (+P/+L/+N/+S) shares the
+# GOLD table because they all move like gold. Horse and Dragon get
+# dedicated tables reflecting their extended mobility.
+
+_SHOGI_PAWN_PST = [
+    72, 72, 72, 74, 74, 74, 72, 72, 72,
+    50, 50, 50, 52, 52, 52, 50, 50, 50,
+    32, 32, 32, 34, 34, 34, 32, 32, 32,
+    18, 18, 18, 20, 20, 20, 18, 18, 18,
+     8,  8,  8, 10, 10, 10,  8,  8,  8,
+     2,  2,  2,  4,  4,  4,  2,  2,  2,
+     0,  0,  0,  2,  2,  2,  0,  0,  0,
+     0,  0,  0,  2,  2,  2,  0,  0,  0,
+     0,  0,  0,  2,  2,  2,  0,  0,  0,
+]
+
+_SHOGI_LANCE_PST = [
+    19, 19, 16, 16, 16, 16, 16, 19, 19,
+    17, 17, 14, 14, 14, 14, 14, 17, 17,
+    15, 15, 12, 12, 12, 12, 12, 15, 15,
+    13, 13, 10, 10, 10, 10, 10, 13, 13,
+    11, 11,  8,  8,  8,  8,  8, 11, 11,
+     9,  9,  6,  6,  6,  6,  6,  9,  9,
+     7,  7,  4,  4,  4,  4,  4,  7,  7,
+     5,  5,  2,  2,  2,  2,  2,  5,  5,
+     3,  3,  0,  0,  0,  0,  0,  3,  3,
+]
+
+_SHOGI_KNIGHT_PST = [
+    22, 32, 40, 40, 40, 40, 40, 32, 22,
+    18, 28, 36, 36, 36, 36, 36, 28, 18,
+    14, 24, 32, 32, 32, 32, 32, 24, 14,
+    10, 20, 28, 28, 28, 28, 28, 20, 10,
+     6, 16, 24, 24, 24, 24, 24, 16,  6,
+     2, 12, 20, 20, 20, 20, 20, 12,  2,
+    -2,  8, 16, 16, 16, 16, 16,  8, -2,
+    -6,  4, 12, 12, 12, 12, 12,  4, -6,
+   -10,  0,  8,  8,  8,  8,  8,  0, -10,
+]
+
+_SHOGI_SILVER_PST = [
+    24, 24, 29, 29, 29, 29, 29, 24, 24,
+    21, 21, 26, 26, 26, 26, 26, 21, 21,
+    18, 18, 23, 23, 23, 23, 23, 18, 18,
+    15, 15, 20, 20, 20, 20, 20, 15, 15,
+    12, 12, 17, 17, 17, 17, 17, 12, 12,
+     9,  9, 14, 14, 14, 14, 14,  9,  9,
+     6,  6, 11, 11, 11, 11, 11,  6,  6,
+     3,  3,  8,  8,  8,  8,  8,  3,  3,
+     0,  0,  5,  5,  5,  5,  5,  0,  0,
+]
+
+_SHOGI_GOLD_PST = [
+     10,   10,   10,   13,   13,   13,   10,   10,   10,
+     15,   15,   15,   18,   18,   18,   15,   15,   15,
+      5,    5,    5,    8,    8,    8,    5,    5,    5,
+      6,    6,    6,    9,    9,    9,    6,    6,    6,
+      8,    8,    8,   11,   11,   11,    8,    8,    8,
+     10,   10,   10,   13,   13,   13,   10,   10,   10,
+     12,   12,   12,   15,   15,   15,   12,   12,   12,
+     14,   14,   14,   17,   17,   17,   14,   14,   14,
+     16,   16,   16,   19,   19,   19,   16,   16,   16,
+]
+
+_SHOGI_BISHOP_PST = [
+      5,    3,    6,    9,   12,    9,    6,    3,    5,
+      3,   11,    9,   12,   15,   12,    9,   11,    3,
+      6,    9,   17,   15,   18,   15,   17,    9,    6,
+      9,   12,   15,   23,   21,   23,   15,   12,    9,
+     12,   15,   18,   21,   29,   21,   18,   15,   12,
+      9,   12,   15,   23,   21,   23,   15,   12,    9,
+      6,    9,   17,   15,   18,   15,   17,    9,    6,
+      3,   11,    9,   12,   15,   12,    9,   11,    3,
+      5,    3,    6,    9,   12,    9,    6,    3,    5,
+]
+
+_SHOGI_ROOK_PST = [
+     40,   40,   40,   40,   40,   40,   40,   43,   40,
+     35,   35,   35,   35,   35,   35,   35,   38,   35,
+     30,   30,   30,   30,   30,   30,   30,   33,   30,
+     10,   10,   10,   10,   10,   10,   10,   13,   10,
+     10,   10,   10,   10,   10,   10,   10,   13,   10,
+     10,   10,   10,   10,   10,   10,   10,   13,   10,
+     10,   10,   10,   10,   10,   10,   10,   13,   10,
+      5,    5,    5,    5,    5,    5,    5,    8,    5,
+      0,    0,    0,    0,    0,    0,    0,    3,    0,
+]
+
+_SHOGI_KING_PST = [
+    -90, -100, -105, -135, -135, -135, -105, -100,  -90,
+    -75,  -85,  -90, -120, -120, -120,  -90,  -85,  -75,
+    -60,  -70,  -75, -105, -105, -105,  -75,  -70,  -60,
+    -45,  -55,  -60,  -90,  -90,  -90,  -60,  -55,  -45,
+    -30,  -40,  -45,  -75,  -75,  -75,  -45,  -40,  -30,
+    -15,  -25,  -30,  -60,  -60,  -60,  -30,  -25,  -15,
+     -5,  -15,  -20,  -50,  -50,  -50,  -20,  -15,   -5,
+     20,   10,    5,  -25,  -25,  -25,    5,   10,   20,
+     30,   20,   15,  -15,  -15,  -15,   15,   20,   30,
+]
+
+_SHOGI_HORSE_PST = [
+     24,   16,   16,   16,   16,   16,   16,   16,   24,
+     16,   28,   20,   20,   20,   20,   20,   28,   16,
+     16,   20,   32,   24,   24,   24,   32,   20,   16,
+     16,   20,   24,   36,   28,   36,   24,   20,   16,
+     16,   20,   24,   28,   40,   28,   24,   20,   16,
+     16,   20,   24,   36,   28,   36,   24,   20,   16,
+     16,   20,   32,   24,   24,   24,   32,   20,   16,
+     16,   28,   20,   20,   20,   20,   20,   28,   16,
+     24,   16,   16,   16,   16,   16,   16,   16,   24,
+]
+
+_SHOGI_DRAGON_PST = [
+     40,   43,   46,   49,   52,   49,   46,   43,   40,
+     39,   39,   42,   45,   48,   45,   42,   39,   39,
+     38,   38,   38,   41,   44,   41,   38,   38,   38,
+     37,   37,   37,   37,   40,   37,   37,   37,   37,
+     27,   27,   27,   27,   27,   27,   27,   27,   27,
+     24,   24,   24,   24,   27,   24,   24,   24,   24,
+     21,   21,   21,   24,   27,   24,   21,   21,   21,
+     18,   18,   21,   24,   27,   24,   21,   18,   18,
+     15,   18,   21,   24,   27,   24,   21,   18,   15,
+]
+
+# Map absolute piece code 1..14 to its PST. Promoted small pieces share
+# the Gold table because they all move exactly like gold.
+_SHOGI_PST_BY_PIECE = {
+    1:  _SHOGI_PAWN_PST,
+    2:  _SHOGI_LANCE_PST,
+    3:  _SHOGI_KNIGHT_PST,
+    4:  _SHOGI_SILVER_PST,
+    5:  _SHOGI_GOLD_PST,
+    6:  _SHOGI_BISHOP_PST,
+    7:  _SHOGI_ROOK_PST,
+    8:  _SHOGI_KING_PST,
+    9:  _SHOGI_GOLD_PST,   # tokin (+pawn)
+    10: _SHOGI_GOLD_PST,   # +lance
+    11: _SHOGI_GOLD_PST,   # +knight
+    12: _SHOGI_GOLD_PST,   # +silver
+    13: _SHOGI_HORSE_PST,  # +bishop
+    14: _SHOGI_DRAGON_PST, # +rook
+}
+
+
+def _shogi_mirror_sq(sq: int) -> int:
+    """Point-mirror (rotate 180°) for a sente-POV PST applied to a gote
+    piece. Shogi's initial position is *point-symmetric*, not just
+    vertically mirrored — sente's rook on (rank 7, file 1) and gote's
+    rook on (rank 1, file 7) are equivalent positions, so the mirror
+    must flip BOTH rank and file to preserve symmetry.
+    """
+    return (8 - sq // 9) * 9 + (8 - (sq % 9))
+
+
+def _shogi_piece_psts(state: GameState) -> int:
+    """Sum of per-piece PST contributions, sente POV, integer-only.
+
+    Sente pieces look up the PST at their own square; gote pieces look
+    up the PST at the vertically mirrored square and contribute with
+    reversed sign. Returns a signed centipawn-ish integer.
+    """
+    board = state.board_array()
+    score = 0
+    for sq in range(81):
+        piece = int(board[sq])
+        if piece == 0:
+            continue
+        pv = piece if piece > 0 else -piece
+        pst = _SHOGI_PST_BY_PIECE.get(pv)
+        if pst is None:
+            continue
+        if piece > 0:
+            score += pst[sq]
+        else:
+            score -= pst[_shogi_mirror_sq(sq)]
+    return score
+
 
 # MVV-LVA values exported for shogi move-ordering. Keys are (board_code - 1)
 # because MoveOrdering does ``piece_values.get(abs(board[sq]) - 1, 100)``.
@@ -567,6 +752,7 @@ def _shogi_rook_positional(state: GameState) -> float:
 
 def _shogi_evaluate(state: GameState) -> float:
     score = (_shogi_material(state)
+             + _shogi_piece_psts(state)
              + _shogi_king_safety(state)
              + _shogi_rook_positional(state)
              + _shogi_attack_cluster(state)
@@ -595,107 +781,146 @@ def _shogi_material_only(state: GameState) -> float:
 
 _CHESS_PIECE_VALUES = {1: 100, 2: 320, 3: 330, 4: 500, 5: 900, 6: 20000}
 
-# --- Tapered piece-square tables -----------------------------------------
+# --- Tapered piece-square tables (PeSTO) ---------------------------------
 #
-# Two tables per piece type: one tuned for the middlegame (emphasising
-# central presence, king safety, developed pieces) and one for the
-# endgame (emphasising king activity, passed pawn support, long-range
-# rook files). Phase-weighted interpolation between the two produces a
-# smooth evaluation across the game.
+# Two tables per piece type: middlegame and endgame. Phase-weighted
+# interpolation between the two produces a smooth evaluation across the
+# game. Values are from Ronald Friederich's PeSTO tuning (Texel-tuned
+# against ~800k positions) — strictly stronger than the old Simplified
+# Evaluation tables that shipped before.
 #
-# Tables are in "white's view": sq 0 = a1 (white queenside corner), sq 63
-# = h8 (black kingside corner). For black pieces we mirror vertically via
-# ``_chess_mirror_sq``.
+# Orientation: ``sq = rank * 8 + file`` with ``rank 0 = white's back
+# rank`` (matches ``_chess_position.h``). The first row of each table is
+# rank 0 (a1..h1), the last row is rank 7 (a8..h8). For black pieces we
+# mirror vertically via ``_chess_mirror_sq``.
+#
+# Historical note: earlier versions of these tables were written in the
+# "rank 8 at top" visual style but indexed directly with ``sq``, which
+# silently flipped every value upside-down. That's why pawns used to
+# reward staying on rank 2 and penalised advancing — a bootstrap-killing
+# bug that made the rule-based teacher actively hostile to development.
 
 _CHESS_PAWN_MG = [
-     0,  0,  0,  0,  0,  0,  0,  0,
-    50, 50, 50, 50, 50, 50, 50, 50,
-    10, 10, 20, 30, 30, 20, 10, 10,
-     5,  5, 10, 25, 25, 10,  5,  5,
-     0,  0,  0, 20, 20,  0,  0,  0,
-     5, -5,-10,  0,  0,-10, -5,  5,
-     5, 10, 10,-20,-20, 10, 10,  5,
-     0,  0,  0,  0,  0,  0,  0,  0,
+      0,   0,   0,   0,   0,   0,   0,   0,   # rank 0 (white back rank — pawns never here)
+    -35,  -1, -20, -23, -15,  24,  38, -22,   # rank 1 (white pawn starting rank)
+    -26,  -4,  -4, -10,   3,   3,  33, -12,   # rank 2
+    -27,  -2,  -5,  12,  17,   6,  10, -25,   # rank 3 (d4/e4 rewarded)
+    -14,  13,   6,  21,  23,  12,  17, -23,   # rank 4
+     -6,   7,  26,  31,  65,  56,  25, -20,   # rank 5
+     98, 134,  61,  95,  68, 126,  34, -11,   # rank 6 (pre-promotion)
+      0,   0,   0,   0,   0,   0,   0,   0,   # rank 7 (promotion target)
 ]
 _CHESS_PAWN_EG = [
-     0,  0,  0,  0,  0,  0,  0,  0,
-    80, 80, 80, 80, 80, 80, 80, 80,
-    50, 50, 50, 50, 50, 50, 50, 50,
-    30, 30, 30, 30, 30, 30, 30, 30,
-    20, 20, 20, 20, 20, 20, 20, 20,
-    10, 10, 10, 10, 10, 10, 10, 10,
-    10, 10, 10, 10, 10, 10, 10, 10,
-     0,  0,  0,  0,  0,  0,  0,  0,
+      0,   0,   0,   0,   0,   0,   0,   0,
+     13,   8,   8,  10,  13,   0,   2,  -7,
+      4,   7,  -6,   1,   0,  -5,  -1,  -8,
+     13,   9,  -3,  -7,  -7,  -8,   3,  -1,
+     32,  24,  13,   5,  -2,   4,  17,  17,
+     94, 100,  85,  67,  56,  53,  82,  84,
+    178, 173, 158, 134, 147, 132, 165, 187,   # passed pawns huge in endgame
+      0,   0,   0,   0,   0,   0,   0,   0,
 ]
 _CHESS_KNIGHT_MG = [
-   -50,-40,-30,-30,-30,-30,-40,-50,
-   -40,-20,  0,  0,  0,  0,-20,-40,
-   -30,  0, 10, 15, 15, 10,  0,-30,
-   -30,  5, 15, 20, 20, 15,  5,-30,
-   -30,  0, 15, 20, 20, 15,  0,-30,
-   -30,  5, 10, 15, 15, 10,  5,-30,
-   -40,-20,  0,  5,  5,  0,-20,-40,
-   -50,-40,-30,-30,-30,-30,-40,-50,
+   -105, -21, -58, -33, -17, -28, -19, -23,   # rank 0 (b1/g1 start squares rewarded by search via development)
+    -29, -53, -12,  -3,  -1,  18, -14, -19,
+    -23,  -9,  12,  10,  19,  17,  25, -16,
+    -13,   4,  16,  13,  28,  19,  21,  -8,   # rank 3 (f3/c3 knight outpost)
+     -9,  17,  19,  53,  37,  69,  18,  22,
+    -47,  60,  37,  65,  84, 129,  73,  44,
+    -73, -41,  72,  36,  23,  62,   7, -17,
+   -167, -89, -34, -49,  61, -97, -15, -107,
 ]
-_CHESS_KNIGHT_EG = _CHESS_KNIGHT_MG  # knight value changes little by phase
-
+_CHESS_KNIGHT_EG = [
+    -29, -51, -23, -15, -22, -18, -50, -64,
+    -42, -20, -10,  -5,  -2, -20, -23, -44,
+    -23,  -3,  -1,  15,  10,  -3, -20, -22,
+    -18,  -6,  16,  25,  16,  17,   4, -18,
+    -17,   3,  22,  22,  22,  11,   8, -18,
+    -24, -20,  10,   9,  -1,  -9, -19, -41,
+    -25,  -8, -25,  -2,  -9, -25, -24, -52,
+    -58, -38, -13, -28, -31, -27, -63, -99,
+]
 _CHESS_BISHOP_MG = [
-   -20,-10,-10,-10,-10,-10,-10,-20,
-   -10,  0,  0,  0,  0,  0,  0,-10,
-   -10,  0, 10, 10, 10, 10,  0,-10,
-   -10,  5,  5, 10, 10,  5,  5,-10,
-   -10,  0,  5, 10, 10,  5,  0,-10,
-   -10, 10,  5, 10, 10,  5, 10,-10,
-   -10,  5,  0,  0,  0,  0,  5,-10,
-   -20,-10,-10,-10,-10,-10,-10,-20,
+    -33,  -3, -14, -21, -13, -12, -39, -21,   # rank 0 (c1/f1 start)
+      4,  15,  16,   0,   7,  21,  33,   1,
+      0,  15,  15,  15,  14,  27,  18,  10,
+     -6,  13,  13,  26,  34,  12,  10,   4,
+     -4,   5,  19,  50,  37,  37,   7,  -2,
+    -16,  37,  43,  40,  35,  50,  37,  -2,
+    -26,  16, -18, -13,  30,  59,  18, -47,
+    -29,   4, -82, -37, -25, -42,   7,  -8,
 ]
-_CHESS_BISHOP_EG = _CHESS_BISHOP_MG
-
+_CHESS_BISHOP_EG = [
+    -23,  -9, -23,  -5,  -9, -16,  -5, -17,
+    -14, -18,  -7,  -1,   4,  -9, -15, -27,
+    -12,  -3,   8,  10,  13,   3,  -7, -15,
+     -6,   3,  13,  19,   7,  10,  -3,  -9,
+     -3,   9,  12,   9,  14,  10,   3,   2,
+      2,  -8,   0,  -1,  -2,   6,   0,   4,
+     -8,  -4,   7, -12,  -3, -13,  -4, -14,
+    -14, -21, -11,  -8,  -7,  -9, -17, -24,
+]
 _CHESS_ROOK_MG = [
-     0,  0,  0,  0,  0,  0,  0,  0,
-     5, 10, 10, 10, 10, 10, 10,  5,
-    -5,  0,  0,  0,  0,  0,  0, -5,
-    -5,  0,  0,  0,  0,  0,  0, -5,
-    -5,  0,  0,  0,  0,  0,  0, -5,
-    -5,  0,  0,  0,  0,  0,  0, -5,
-    -5,  0,  0,  0,  0,  0,  0, -5,
-     0,  0,  0,  5,  5,  0,  0,  0,
+    -19, -13,   1,  17,  16,   7, -37, -26,   # rank 0 (d1/e1 slight bonus = central rook good)
+    -44, -16, -20,  -9,  -1,  11,  -6, -71,
+    -45, -25, -16, -17,   3,   0,  -5, -33,
+    -36, -26, -12,  -1,   9,  -7,   6, -23,
+    -24, -11,   7,  26,  24,  35,  -8, -20,
+     -5,  19,  26,  36,  17,  45,  61,  16,
+     27,  32,  58,  62,  80,  67,  26,  44,   # rank 6 = "rook on 7th" huge bonus
+     32,  42,  32,  51,  63,   9,  31,  43,
 ]
-_CHESS_ROOK_EG = _CHESS_ROOK_MG
-
+_CHESS_ROOK_EG = [
+     -9,   2,   3,  -1,  -5, -13,   4, -20,
+     -6,  -6,   0,   2,  -9,  -9, -11,  -3,
+     -4,   0,  -5,  -1,  -7, -12,  -8, -16,
+      3,   5,   8,   4,  -5,  -6,  -8, -11,
+      4,   3,  13,   1,   2,   1,  -1,   2,
+      7,   7,   7,   5,   4,  -3,  -5,  -3,
+     11,  13,  13,  11,  -3,   3,   8,   3,
+     13,  10,  18,  15,  12,  12,   8,   5,
+]
 _CHESS_QUEEN_MG = [
-   -20,-10,-10, -5, -5,-10,-10,-20,
-   -10,  0,  0,  0,  0,  0,  0,-10,
-   -10,  0,  5,  5,  5,  5,  0,-10,
-    -5,  0,  5,  5,  5,  5,  0, -5,
-     0,  0,  5,  5,  5,  5,  0, -5,
-   -10,  5,  5,  5,  5,  5,  0,-10,
-   -10,  0,  5,  0,  0,  0,  0,-10,
-   -20,-10,-10, -5, -5,-10,-10,-20,
+     -1, -18,  -9,  10, -15, -25, -31, -50,   # rank 0 (d1 start = +10)
+    -35,  -8,  11,   2,   8,  15,  -3,   1,
+    -14,   2, -11,  -2,  -5,   2,  14,   5,
+     -9, -26,  -9, -10,  -2,  -4,   3,  -3,
+    -27, -27, -16, -16,  -1,  17,  -2,   1,
+    -13, -17,   7,   8,  29,  56,  47,  57,
+    -24, -39,  -5,   1, -16,  57,  28,  54,
+    -28,   0,  29,  12,  59,  44,  43,  45,
 ]
-_CHESS_QUEEN_EG = _CHESS_QUEEN_MG
-
-# Middlegame king PST: corners safer, centre dangerous.
+_CHESS_QUEEN_EG = [
+    -33, -28, -22, -43,  -5, -32, -20, -41,
+    -22, -23, -30, -16, -16, -23, -36, -32,
+    -16, -27,  15,   6,   9,  17,  10,   5,
+     -1,  15,   2,  12,  17,  15,  20,  10,
+      3,  22,  24,  45,  57,  40,  57,  36,
+    -18,  28,  19,  47,  31,  34,  39,  23,
+    -17,  20,  32,  41,  58,  25,  30,   0,
+     -9,  22,  22,  27,  27,  19,  10,  20,
+]
+# Middlegame king PST: corners/castled squares safer, centre dangerous.
 _CHESS_KING_MG = [
-   -30,-40,-40,-50,-50,-40,-40,-30,
-   -30,-40,-40,-50,-50,-40,-40,-30,
-   -30,-40,-40,-50,-50,-40,-40,-30,
-   -30,-40,-40,-50,-50,-40,-40,-30,
-   -20,-30,-30,-40,-40,-30,-30,-20,
-   -10,-20,-20,-20,-20,-20,-20,-10,
-    20, 20,  0,  0,  0,  0, 20, 20,
-    20, 30, 10,  0,  0, 10, 30, 20,
+    -15,  36,  12, -54,   8, -28,  24,  14,   # rank 0 (b1=36 queenside, g1=24 kingside castled)
+      1,   7,  -8, -64, -43, -16,   9,   8,
+    -14, -14, -22, -46, -44, -30, -15, -27,
+    -49,  -1, -27, -39, -46, -44, -33, -51,
+    -17, -20, -12, -27, -30, -25, -14, -36,
+     -9,  24,   2, -16, -20,   6,  22, -22,
+     29,  -1, -20,  -7,  -8,  -4, -38, -29,
+    -65,  23,  16, -15, -56, -34,   2,  13,
 ]
 # Endgame king PST: opposite — activity matters, centre dominates.
 _CHESS_KING_EG = [
-   -50,-40,-30,-20,-20,-30,-40,-50,
-   -30,-20,-10,  0,  0,-10,-20,-30,
-   -30,-10, 20, 30, 30, 20,-10,-30,
-   -30,-10, 30, 40, 40, 30,-10,-30,
-   -30,-10, 30, 40, 40, 30,-10,-30,
-   -30,-10, 20, 30, 30, 20,-10,-30,
-   -30,-30,  0,  0,  0,  0,-30,-30,
-   -50,-30,-30,-30,-30,-30,-30,-50,
+    -53, -34, -21, -11, -28, -14, -24, -43,   # rank 0 (endgame: king should NOT hide)
+    -27, -11,   4,  13,  14,   4,  -5, -17,
+    -19,  -3,  11,  21,  23,  16,   7,  -9,
+    -18,  -4,  21,  24,  27,  23,   9, -11,
+     -8,  22,  24,  27,  26,  33,  26,   3,
+     10,  17,  23,  15,  20,  45,  44,  13,
+    -12,  17,  14,  17,  17,  38,  23,  11,
+    -74, -35, -18, -18, -11,  15,   4, -17,
 ]
 
 _CHESS_PST_MG = {
@@ -1238,11 +1463,21 @@ def _chess_mobility(board, knight_w: List[int], knight_b: List[int],
     return score
 
 
+# Passed-pawn rank bonus keyed by "squares from promotion": a pawn on
+# its 7th rank (one step from promotion) scores highest. Index is the
+# pawn's rank for white, or (7 - rank) for black. [0] and [7] are 0
+# because pawns can't legally be on the back ranks.
+_CHESS_PASSED_PAWN_RANK_BONUS = [0, 5, 15, 35, 75, 130, 180, 0]
+
+
 def _chess_passed_pawn_bonus(white_pawn_squares: List[int],
-                              black_pawn_squares: List[int]) -> float:
+                              black_pawn_squares: List[int]) -> int:
     """Passed pawn bonuses — pawn has no enemy pawn ahead on the same
-    file or the two adjacent files. Bonus scales with rank advanced."""
-    score = 0.0
+    file or the two adjacent files. Bonus scales exponentially with
+    rank advanced (PeSTO-calibrated values): a pawn one step from
+    promotion is worth ~2 minor pieces. White-POV integer score.
+    """
+    score = 0
 
     # White passed pawns: check no black pawn on files f-1, f, f+1 with
     # rank strictly greater than this pawn's rank.
@@ -1255,9 +1490,7 @@ def _chess_passed_pawn_bonus(white_pawn_squares: List[int],
                 blocked = True
                 break
         if not blocked:
-            # Rank bonus: pawn's advancement from its starting rank (1).
-            advance = r - 1  # 0..6, since promotion at rank 7
-            score += 10 + advance * 12
+            score += _CHESS_PASSED_PAWN_RANK_BONUS[r]
 
     for sq in black_pawn_squares:
         f, r = sq % 8, sq // 8
@@ -1268,10 +1501,339 @@ def _chess_passed_pawn_bonus(white_pawn_squares: List[int],
                 blocked = True
                 break
         if not blocked:
-            advance = 6 - r  # 0..6
-            score -= 10 + advance * 12
+            score -= _CHESS_PASSED_PAWN_RANK_BONUS[7 - r]
 
     return score
+
+
+def _chess_backward_pawns(white_pawn_squares: List[int],
+                           black_pawn_squares: List[int]) -> int:
+    """Backward-pawn penalty.
+
+    A pawn is "backward" when it:
+      * has no friendly pawns on adjacent files at equal or lower rank
+        (for white; higher rank for black), meaning it can't be
+        supported by a neighbour push, and
+      * its one-step advance square is controlled by an enemy pawn,
+        meaning the pawn can't safely push forward to get support.
+
+    Backward pawns are chronic weaknesses — the square in front becomes
+    an outpost for enemy minor pieces, and the pawn itself is a
+    permanent target. Stockfish weights these around -9 mg / -24 eg.
+    """
+    score = 0
+    w_set = set(white_pawn_squares)
+    b_set = set(black_pawn_squares)
+
+    for sq in white_pawn_squares:
+        f, r = sq % 8, sq // 8
+        # Friendly pawn on adjacent file at same-or-behind rank?
+        supported = False
+        for df in (-1, 1):
+            nf = f + df
+            if not (0 <= nf < 8):
+                continue
+            for nr in range(0, r + 1):
+                if (nr * 8 + nf) in w_set:
+                    supported = True
+                    break
+            if supported:
+                break
+        if supported:
+            continue
+        # Advance square controlled by enemy pawn?
+        adv_r = r + 1
+        if adv_r >= 8:
+            continue
+        controlled = False
+        for df in (-1, 1):
+            nf = f + df
+            if 0 <= nf < 8:
+                attacker_r = adv_r + 1
+                if attacker_r < 8 and (attacker_r * 8 + nf) in b_set:
+                    controlled = True
+                    break
+        if controlled:
+            score -= 10
+
+    for sq in black_pawn_squares:
+        f, r = sq % 8, sq // 8
+        supported = False
+        for df in (-1, 1):
+            nf = f + df
+            if not (0 <= nf < 8):
+                continue
+            for nr in range(r, 8):
+                if (nr * 8 + nf) in b_set:
+                    supported = True
+                    break
+            if supported:
+                break
+        if supported:
+            continue
+        adv_r = r - 1
+        if adv_r < 0:
+            continue
+        controlled = False
+        for df in (-1, 1):
+            nf = f + df
+            if 0 <= nf < 8:
+                attacker_r = adv_r - 1
+                if attacker_r >= 0 and (attacker_r * 8 + nf) in w_set:
+                    controlled = True
+                    break
+        if controlled:
+            score += 10
+
+    return score
+
+
+def _chess_trapped_rook(white_rooks: List[int], black_rooks: List[int],
+                         white_king_sq: Optional[int],
+                         black_king_sq: Optional[int]) -> int:
+    """Trapped-rook penalty.
+
+    A rook "trapped" in the corner after a king move to the adjacent
+    file is a classical positional disaster — the rook can't reach open
+    files and spends moves clearing itself out. Happens specifically
+    when:
+      * white rook on f1/g1/h1 with king on e1/f1/g1 (or the queenside
+        mirror a1/b1/c1 with king on b1/c1/d1)
+      * likewise for black on rank 7
+    Penalty: -40 mg, 0 eg (endgame doesn't care about trapped rooks).
+    """
+    score = 0
+
+    if white_king_sq is not None and white_king_sq >= 0:
+        wkf, wkr = white_king_sq % 8, white_king_sq // 8
+        if wkr == 0:
+            for rsq in white_rooks:
+                rf, rr = rsq % 8, rsq // 8
+                if rr != 0:
+                    continue
+                # Kingside trap: king on e/f/g, rook on f/g/h
+                if 4 <= wkf <= 6 and 5 <= rf <= 7 and rf > wkf:
+                    score -= 40
+                    break
+                # Queenside trap: king on b/c/d, rook on a/b/c
+                if 1 <= wkf <= 3 and 0 <= rf <= 2 and rf < wkf:
+                    score -= 40
+                    break
+
+    if black_king_sq is not None and black_king_sq >= 0:
+        bkf, bkr = black_king_sq % 8, black_king_sq // 8
+        if bkr == 7:
+            for rsq in black_rooks:
+                rf, rr = rsq % 8, rsq // 8
+                if rr != 7:
+                    continue
+                if 4 <= bkf <= 6 and 5 <= rf <= 7 and rf > bkf:
+                    score += 40
+                    break
+                if 1 <= bkf <= 3 and 0 <= rf <= 2 and rf < bkf:
+                    score += 40
+                    break
+
+    return score
+
+
+def _chess_bad_bishop(white_bishop_squares: List[int],
+                       black_bishop_squares: List[int],
+                       white_pawn_squares: List[int],
+                       black_pawn_squares: List[int]) -> int:
+    """Bad-bishop penalty: a bishop is "bad" when many of its own pawns
+    are on squares of its colour, blocking its diagonals. Penalty is
+    proportional to the number of friendly pawns on matching-colour
+    squares — roughly -4 per pawn in MG, a touch less in the formula
+    below for simplicity (we apply flat -4).
+    """
+    score = 0
+    for bsq in white_bishop_squares:
+        bishop_color = (bsq // 8 + bsq % 8) & 1
+        same_color = 0
+        for psq in white_pawn_squares:
+            if ((psq // 8 + psq % 8) & 1) == bishop_color:
+                same_color += 1
+        score -= 4 * same_color
+    for bsq in black_bishop_squares:
+        bishop_color = (bsq // 8 + bsq % 8) & 1
+        same_color = 0
+        for psq in black_pawn_squares:
+            if ((psq // 8 + psq % 8) & 1) == bishop_color:
+                same_color += 1
+        score += 4 * same_color
+    return score
+
+
+def _chess_undeveloped_minors(white_knights: List[int],
+                               white_bishop_squares: List[int],
+                               black_knights: List[int],
+                               black_bishop_squares: List[int]) -> int:
+    """Development debt: count minor pieces still on their starting
+    squares and penalise -8 cp each. Forces the search to spend opening
+    tempo actually developing rather than shuffling pawns back and
+    forth. Only meaningful in MG phase (phase-scaled by caller).
+    """
+    penalty = 0
+    # White starting squares: Nb1=1, Nc1 bishop already gone, Nc1 bishop starts at c1=2, f1=5, Ng1=6
+    for sq in white_knights:
+        if sq == 1 or sq == 6:
+            penalty -= 8
+    for sq in white_bishop_squares:
+        if sq == 2 or sq == 5:
+            penalty -= 8
+    for sq in black_knights:
+        if sq == 57 or sq == 62:
+            penalty += 8
+    for sq in black_bishop_squares:
+        if sq == 58 or sq == 61:
+            penalty += 8
+    return penalty
+
+
+def _chess_rook_connectivity(white_rooks: List[int],
+                              black_rooks: List[int],
+                              board) -> int:
+    """Connected rooks bonus.
+
+    Two friendly rooks on the same rank or file with no piece between
+    them score +15 — they defend each other and double the pressure on
+    the shared line. This is one of the classical "rooks doubled on
+    an open file" signals.
+    """
+    score = 0
+    if len(white_rooks) == 2:
+        r0, r1 = white_rooks
+        if _chess_rooks_see_each_other(r0, r1, board):
+            score += 15
+    if len(black_rooks) == 2:
+        r0, r1 = black_rooks
+        if _chess_rooks_see_each_other(r0, r1, board):
+            score -= 15
+    return score
+
+
+def _chess_rooks_see_each_other(sq0: int, sq1: int, board) -> bool:
+    """True if the two squares share a rank or file AND there are no
+    pieces on the squares strictly between them."""
+    r0, f0 = sq0 // 8, sq0 % 8
+    r1, f1 = sq1 // 8, sq1 % 8
+    if r0 == r1:
+        lo, hi = (f0, f1) if f0 < f1 else (f1, f0)
+        for f in range(lo + 1, hi):
+            if int(board[r0 * 8 + f]) != 0:
+                return False
+        return True
+    if f0 == f1:
+        lo, hi = (r0, r1) if r0 < r1 else (r1, r0)
+        for r in range(lo + 1, hi):
+            if int(board[r * 8 + f0]) != 0:
+                return False
+        return True
+    return False
+
+
+# Attacker weight for king-zone pressure. Queens dominate, rooks next,
+# minors cheap. Values roughly match Stockfish classical.
+_CHESS_KING_ATTACK_WEIGHT = {2: 20, 3: 20, 4: 40, 5: 80}
+
+
+def _chess_king_attack_pressure(board,
+                                 white_king_sq: Optional[int],
+                                 black_king_sq: Optional[int]) -> int:
+    """Quadratic-style king attack pressure (white POV).
+
+    For each friendly king, we walk every enemy piece and ask "does
+    this piece attack any square in the 3x3 zone around the king?".
+    Each attacker contributes weight = piece's attacker weight; the
+    total is multiplied by the attacker count, yielding a roughly
+    quadratic danger score. This is a simplified version of Stockfish's
+    classical king-safety formula — good enough to steer the search
+    away from "king in the centre in a heavy-piece position" labels.
+    """
+    score = 0
+    # Danger TO white king (enemy = black).
+    if white_king_sq is not None and white_king_sq >= 0:
+        score -= _chess_king_danger_from(board, white_king_sq, attacker_sign=-1)
+    # Danger TO black king (enemy = white).
+    if black_king_sq is not None and black_king_sq >= 0:
+        score += _chess_king_danger_from(board, black_king_sq, attacker_sign=+1)
+    return score
+
+
+def _chess_king_danger_from(board, king_sq: int, attacker_sign: int) -> int:
+    """Sum king-zone attacks from pieces of the given sign (+1 white,
+    -1 black). Returns a positive penalty magnitude."""
+    kr, kf = king_sq // 8, king_sq % 8
+    # The king-zone squares (3x3 centred on king, clipped to board).
+    zone_mask = 0
+    for dr in (-1, 0, 1):
+        for df in (-1, 0, 1):
+            nr, nf = kr + dr, kf + df
+            if 0 <= nr < 8 and 0 <= nf < 8:
+                zone_mask |= 1 << (nr * 8 + nf)
+
+    attackers = 0
+    weight_sum = 0
+    for sq in range(64):
+        piece = int(board[sq])
+        if piece == 0:
+            continue
+        if attacker_sign > 0 and piece < 0:
+            continue
+        if attacker_sign < 0 and piece > 0:
+            continue
+        abs_p = abs(piece)
+        if abs_p not in _CHESS_KING_ATTACK_WEIGHT:
+            continue
+        attacks = _chess_piece_attacks_mask(board, sq, abs_p, zone_mask)
+        if attacks > 0:
+            attackers += 1
+            weight_sum += _CHESS_KING_ATTACK_WEIGHT[abs_p] * attacks
+    if attackers == 0:
+        return 0
+    # Roughly-quadratic: weight_sum * attackers / 8. Clamp high values
+    # so a single flashy attack doesn't saturate the entire eval.
+    danger = (weight_sum * attackers) // 8
+    if danger > 400:
+        danger = 400
+    return danger
+
+
+def _chess_piece_attacks_mask(board, sq: int, abs_p: int, zone_mask: int) -> int:
+    """Count how many squares in ``zone_mask`` (as a 64-bit bitmap)
+    this piece on ``sq`` attacks. Uses ray walks for sliders and fixed
+    offsets for knights. Does NOT filter for friendly occupation at the
+    target (attack-through-own-piece counts), matching Stockfish's
+    "attack map" convention.
+    """
+    r0, f0 = sq // 8, sq % 8
+    count = 0
+    if abs_p == 2:  # Knight
+        for dr, df in _CHESS_KNIGHT_OFFSETS:
+            nr, nf = r0 + dr, f0 + df
+            if 0 <= nr < 8 and 0 <= nf < 8:
+                if zone_mask & (1 << (nr * 8 + nf)):
+                    count += 1
+        return count
+    if abs_p == 3:  # Bishop
+        dirs = _CHESS_BISHOP_DIRS
+    elif abs_p == 4:  # Rook
+        dirs = _CHESS_ROOK_DIRS
+    elif abs_p == 5:  # Queen
+        dirs = _CHESS_QUEEN_DIRS
+    else:
+        return 0
+    for dr, df in dirs:
+        nr, nf = r0 + dr, f0 + df
+        while 0 <= nr < 8 and 0 <= nf < 8:
+            if zone_mask & (1 << (nr * 8 + nf)):
+                count += 1
+            if int(board[nr * 8 + nf]) != 0:
+                break
+            nr += dr
+            nf += df
+    return count
 
 
 def _chess_rule_based(state: GameState) -> float:
@@ -1367,10 +1929,12 @@ def _chess_rule_based(state: GameState) -> float:
     pawn_struct = _chess_pawn_structure(pawn_files_white, pawn_files_black)
     passed = _chess_passed_pawn_bonus(white_pawn_squares, black_pawn_squares)
     connected = _chess_connected_pawns(white_pawn_squares, black_pawn_squares)
-    mg_score += pawn_struct + passed + connected
+    backward = _chess_backward_pawns(white_pawn_squares, black_pawn_squares)
+    mg_score += pawn_struct + passed + connected + backward
     # Integer scales: passed * 3/2 in EG (worth more in endgames);
-    #                 connected * 7/10 in EG (pawn chains matter less).
-    eg_score += pawn_struct + (passed * 3) // 2 + (connected * 7) // 10
+    #                 connected * 7/10 in EG (pawn chains matter less);
+    #                 backward * 2 in EG (weak pawns become targets).
+    eg_score += pawn_struct + (passed * 3) // 2 + (connected * 7) // 10 + backward * 2
 
     # --- Knight outposts ---------------------------------------------
     outposts = _chess_knight_outposts(
@@ -1423,6 +1987,32 @@ def _chess_rule_based(state: GameState) -> float:
     bk_sq = state.king_square(1) if hasattr(state, "king_square") else None
     mg_score += _chess_king_shelter(wk_sq, white_pawn_squares, 0)
     mg_score -= _chess_king_shelter(bk_sq, black_pawn_squares, 1)
+
+    # --- King attack pressure (MG only) -------------------------------
+    # Quadratic-style danger: many attackers of heavy pieces on the
+    # squares around the king swings eval hard toward the attacker.
+    mg_score += _chess_king_attack_pressure(board, wk_sq, bk_sq)
+
+    # --- Piece tactical terms -----------------------------------------
+    trapped = _chess_trapped_rook(white_rooks, black_rooks, wk_sq, bk_sq)
+    mg_score += trapped  # endgame doesn't care about trapped rooks
+
+    bad_bishop = _chess_bad_bishop(
+        white_bishop_squares, black_bishop_squares,
+        white_pawn_squares, black_pawn_squares,
+    )
+    mg_score += bad_bishop
+    eg_score += bad_bishop  # bad bishops also hurt endgames
+
+    connectivity = _chess_rook_connectivity(white_rooks, black_rooks, board)
+    mg_score += connectivity
+    eg_score += connectivity // 2
+
+    undeveloped = _chess_undeveloped_minors(
+        white_knights, white_bishop_squares,
+        black_knights, black_bishop_squares,
+    )
+    mg_score += undeveloped  # opening-only by virtue of MG-only application
 
     # --- Mobility (MG heavier, EG lighter) ---------------------------
     mobility = _chess_mobility(
