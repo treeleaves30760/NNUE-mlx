@@ -94,6 +94,15 @@ static inline void cn_tt_store(CNTTEntry *e, uint64_t key, uint64_t data) {
     atomic_store_explicit(&e->key_xor_data, key ^ data,  memory_order_relaxed);
 }
 
+/* Whether a score is within the range losslessly representable in the TT
+ * (clamped to int16). Mate scores exceed this range and would be
+ * truncated to ±32000 on store, silently destroying the mate distance
+ * and later surfacing as a garbage "near-mate" score at unrelated
+ * positions. Callers should skip the TT store for these. */
+static inline int cn_score_fits_tt(int32_t s) {
+    return s > -32000 && s < 32000;
+}
+
 static inline int cn_tt_probe(CNTTEntry *e, uint64_t key, uint64_t *out_data) {
     uint64_t d    = atomic_load_explicit(&e->data,         memory_order_relaxed);
     uint64_t kxor = atomic_load_explicit(&e->key_xor_data, memory_order_relaxed);
@@ -635,8 +644,10 @@ static int32_t cn_alphabeta(CNThread *t, int depth, int32_t alpha, int32_t beta,
     CNMove moves[CN_MAX_MOVES];
     int nm = cn_expand_legal(gt, &t->pos, moves);
     if (nm == 0) {
-        /* No legal moves: mate if in check, stalemate = draw otherwise */
+        /* No legal moves: mate if in check. Chess stalemate = draw;
+         * shogi stalemate = loss (sente/gote with no moves loses). */
         if (in_check) return -CN_MATE + ply;
+        if (gt == CN_GAME_SHOGI) return -CN_MATE + ply;
         return 0;
     }
 
@@ -747,8 +758,11 @@ static int32_t cn_alphabeta(CNThread *t, int depth, int32_t alpha, int32_t beta,
                     t->history[from * 81 + to] += depth * depth;
                 }
             }
-            cn_tt_store(&s->tt[key & s->tt_mask], key,
-                         cn_tt_pack(cn_tt_score_to_tt(beta, ply), m, depth, CN_TT_BETA));
+            int32_t tt_beta = cn_tt_score_to_tt(beta, ply);
+            if (cn_score_fits_tt(tt_beta)) {
+                cn_tt_store(&s->tt[key & s->tt_mask], key,
+                             cn_tt_pack(tt_beta, m, depth, CN_TT_BETA));
+            }
             if (t->hist_n > 0) t->hist_n--;
             return beta;
         }
@@ -757,8 +771,11 @@ static int32_t cn_alphabeta(CNThread *t, int depth, int32_t alpha, int32_t beta,
     if (t->hist_n > 0) t->hist_n--;
 
     int flag = (best_score <= orig_alpha) ? CN_TT_ALPHA : CN_TT_EXACT;
-    cn_tt_store(&s->tt[key & s->tt_mask], key,
-                 cn_tt_pack(cn_tt_score_to_tt(best_score, ply), best_move, depth, flag));
+    int32_t tt_best = cn_tt_score_to_tt(best_score, ply);
+    if (cn_score_fits_tt(tt_best)) {
+        cn_tt_store(&s->tt[key & s->tt_mask], key,
+                     cn_tt_pack(tt_best, best_move, depth, flag));
+    }
     return best_score;
 }
 
@@ -861,10 +878,12 @@ static void cn_search_root(CNThread *t) {
             t->completed_depth = d;
 
             /* Write back to TT with a root entry so sibling threads can
-             * see the PV move. */
-            cn_tt_store(&s->tt[root_key & s->tt_mask], root_key,
-                         cn_tt_pack(cn_tt_score_to_tt(iter_best, 0),
-                                     iter_move, d, CN_TT_EXACT));
+             * see the PV move. Only store if the score fits in int16 —
+             * mate scores are out-of-range and would be corrupted. */
+            if (cn_score_fits_tt(iter_best)) {
+                cn_tt_store(&s->tt[root_key & s->tt_mask], root_key,
+                             cn_tt_pack(iter_best, iter_move, d, CN_TT_EXACT));
+            }
 
             /* Primary thread publishes top-N for live callbacks. */
             if (t->tid == 0) {

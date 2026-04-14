@@ -23,6 +23,14 @@ extern int32_t shogi_rule_evaluate(const ShogiPosition *p);
 #define SRS_INF            1000000
 #define SRS_MATE           100000
 #define SRS_MAX_PLY        128
+/* Mate threshold and non-mate cap. Any score in [-MATE_THRESHOLD,
+ * MATE_THRESHOLD] is treated as a regular eval and never gets the mate
+ * ply adjustment. NON_MATE_CAP bounds aspiration windows and
+ * fail-high/fail-low returns so they can never enter the mate range
+ * and therefore can't be drifted by the mate adjustment through TT
+ * transpositions. */
+#define SRS_MATE_THRESHOLD (SRS_MATE - SRS_MAX_PLY)   /* 99872 */
+#define SRS_NON_MATE_CAP   (SRS_MATE_THRESHOLD - 1)   /* 99871 */
 #define SRS_TT_SIZE        (1u << 20)  /* ~1M entries */
 #define SRS_HISTORY_SIZE   (82 * 82)   /* from [0..80] + drop(81), to [0..80] */
 #define SRS_MAX_QDEPTH     8
@@ -314,6 +322,27 @@ static inline int srs_time_check(SRSContext *ctx) {
     return ctx->time_up;
 }
 
+/* ---- Mate score ply adjustment (Stockfish convention) ----------------- *
+ * A "mate in N from root" must be stored as "mate in (N - current_ply)"
+ * so the distance-to-mate is measured relative to the stored node, not
+ * the root. When read back at a different ply we reverse the shift so
+ * the returned distance is again relative to the current root.
+ *
+ * Without this adjustment, a mate stored at ply=10 and later probed at
+ * ply=2 via a transposition would report "mate in N-10" from the wrong
+ * origin, and could surface at the search root as a near-mate score
+ * even at a perfectly balanced opening position. */
+static inline int32_t srs_score_to_tt(int32_t s, int ply) {
+    if (s >=  SRS_MATE - SRS_MAX_PLY) return s + ply;
+    if (s <= -SRS_MATE + SRS_MAX_PLY) return s - ply;
+    return s;
+}
+static inline int32_t srs_score_from_tt(int32_t s, int ply) {
+    if (s >=  SRS_MATE - SRS_MAX_PLY) return s - ply;
+    if (s <= -SRS_MATE + SRS_MAX_PLY) return s + ply;
+    return s;
+}
+
 /* ---- TT probe / store -------------------------------------------------- */
 
 static inline SRSTTEntry *srs_tt_probe(SRSContext *ctx, uint64_t key) {
@@ -504,9 +533,19 @@ static int32_t srs_alphabeta(SRSContext *ctx, ShogiPosition *p,
     SRSTTEntry *tt = srs_tt_probe(ctx, key);
     SMove tt_move = SMOVE_NULL;
     if (tt && tt->depth >= depth) {
-        if (tt->flag == SRS_TT_EXACT) return tt->score;
-        if (tt->flag == SRS_TT_ALPHA && tt->score <= alpha) return alpha;
-        if (tt->flag == SRS_TT_BETA  && tt->score >= beta)  return beta;
+        int32_t tt_score = srs_score_from_tt(tt->score, ply);
+        /* Safety net: after the aspiration-window clamp, any non-mate
+         * score should stay inside [-NON_MATE_CAP, NON_MATE_CAP]. An
+         * out-of-range TT value means the entry drifted through
+         * repeated mate-ply adjustments across transpositions — reject
+         * it and re-search to avoid propagating garbage. Mate leaves
+         * (-SRS_MATE + ply) correctly stay inside the mate range and
+         * are still usable for move ordering only. */
+        if (tt_score > -SRS_NON_MATE_CAP && tt_score < SRS_NON_MATE_CAP) {
+            if (tt->flag == SRS_TT_EXACT) return tt_score;
+            if (tt->flag == SRS_TT_ALPHA && tt_score <= alpha) return alpha;
+            if (tt->flag == SRS_TT_BETA  && tt_score >= beta)  return beta;
+        }
     }
     if (tt) tt_move = tt->best_move;
 
@@ -537,8 +576,10 @@ static int32_t srs_alphabeta(SRSContext *ctx, ShogiPosition *p,
     SMove moves[SHOGI_MAX_MOVES];
     int nm = shogi_expand_legal_moves(p, moves);
     if (nm == 0) {
-        /* No legal moves: checkmate if in check, otherwise stalemate (lose) */
-        return -SRS_MATE + (ctx->max_depth - depth);
+        /* No legal moves: checkmate if in check, otherwise stalemate.
+         * Shogi convention: stalemate is also a loss. Ply-adjust so the
+         * root sees "mate distance" (closer mates score higher). */
+        return -SRS_MATE + ply;
     }
 
     SRSScoredMove scored[SHOGI_MAX_MOVES];
@@ -606,13 +647,15 @@ static int32_t srs_alphabeta(SRSContext *ctx, ShogiPosition *p,
                 }
                 ctx->history[srs_history_idx(m)] += depth * depth;
             }
-            srs_tt_store(ctx, key, depth, beta, SRS_TT_BETA, m);
+            srs_tt_store(ctx, key, depth,
+                          srs_score_to_tt(beta, ply), SRS_TT_BETA, m);
             return beta;
         }
     }
 
     uint8_t flag = (best_score <= orig_alpha) ? SRS_TT_ALPHA : SRS_TT_EXACT;
-    srs_tt_store(ctx, key, depth, best_score, flag, best_move);
+    srs_tt_store(ctx, key, depth,
+                  srs_score_to_tt(best_score, ply), flag, best_move);
     return best_score;
 }
 
@@ -647,7 +690,11 @@ static void srs_search_root(SRSContext *ctx, ShogiPosition *p,
         int32_t delta = 25;
 
         if (d <= 2) {
-            alpha = -SRS_INF; beta = SRS_INF;
+            /* Initial search: use the widest NON-MATE window so fail-
+             * high/fail-low returns don't enter the mate-score range
+             * and get accidentally ply-adjusted in the TT. */
+            alpha = -SRS_NON_MATE_CAP;
+            beta  = SRS_NON_MATE_CAP;
         } else {
             alpha = last_score - delta;
             beta  = last_score + delta;
@@ -728,13 +775,20 @@ static void srs_search_root(SRSContext *ctx, ShogiPosition *p,
             if (root_best <= alpha) {
                 alpha = alpha - delta * 2;
                 delta *= 2;
-                if (alpha < -SRS_INF) alpha = -SRS_INF;
+                /* Clamp alpha above -MATE_THRESHOLD so fail-low returns
+                 * don't enter the mate-score range and drift through
+                 * TT transpositions via the ply adjustment. */
+                if (alpha < -SRS_NON_MATE_CAP) alpha = -SRS_NON_MATE_CAP;
                 continue;
             }
             if (root_best >= beta) {
                 beta = beta + delta * 2;
                 delta *= 2;
-                if (beta > SRS_INF) beta = SRS_INF;
+                /* Clamp beta below MATE_THRESHOLD so fail-high returns
+                 * don't get mate-adjusted in TT. If the true value is
+                 * above the cap, the search correctly treats it as
+                 * "mate or very-high-eval" and returns ~NON_MATE_CAP. */
+                if (beta > SRS_NON_MATE_CAP) beta = SRS_NON_MATE_CAP;
                 continue;
             }
             score = root_best;

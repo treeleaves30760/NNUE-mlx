@@ -66,10 +66,19 @@ typedef struct {
     /* History heuristic: from*64 + to */
     int32_t history[CRS_HISTORY_SIZE];
 
+    /* Counter-move heuristic: counter[from_prev * 64 + to_prev] is the
+     * move that refuted the previous move. Cheap, cuts maybe 5% of
+     * nodes in quiet middlegame positions. */
+    ChMove counter[64 * 64];
+    ChMove prev_move;
+
     /* Game history of hashes (for 3-fold detection). Copied in at
      * search-start from the Python ChessState history tuple. */
     uint64_t hist[CRS_HISTORY_MAX];
     int      hist_n;
+
+    /* LMR table: reduction amount indexed by [depth][move_index]. */
+    int8_t lmr[64][64];
 
     int    max_depth;
     double time_limit_ms;
@@ -77,6 +86,9 @@ typedef struct {
     int    time_up;
     long   nodes;
 } CRSContext;
+
+/* Futility margin per depth (for shallow futility pruning). */
+static const int32_t CRS_FUTILITY_MARGIN[4] = { 0, 150, 300, 500 };
 
 /* Single global context — bootstrap workers are processes, so thread
  * safety is not a concern. */
@@ -89,11 +101,27 @@ static double crs_now_ms(void) {
     return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
 }
 
+static void crs_lmr_init(CRSContext *ctx) {
+    for (int d = 0; d < 64; d++) {
+        for (int m = 0; m < 64; m++) {
+            if (d < 2 || m < 2) { ctx->lmr[d][m] = 0; continue; }
+            /* Stockfish-lite formula: log(d) * log(m) / 2. Keep the
+             * reduction modest — chess rule search is less aggressive
+             * than an NNUE search. */
+            int r = (int)(1.0 + log((double)d) * log((double)m) / 2.5);
+            if (r < 0) r = 0;
+            if (r > 6) r = 6;
+            ctx->lmr[d][m] = (int8_t)r;
+        }
+    }
+}
+
 static void crs_context_init(CRSContext *ctx) {
     if (!ctx->tt) {
         ctx->tt = (CRSTTEntry *)calloc(CRS_TT_SIZE, sizeof(CRSTTEntry));
         ctx->tt_mask = CRS_TT_SIZE - 1;
     }
+    crs_lmr_init(ctx);
     g_crs_initialized = 1;
 }
 
@@ -101,6 +129,8 @@ static void crs_reset_for_search(CRSContext *ctx, int max_depth,
                                   double time_limit_ms) {
     memset(ctx->killers, 0xFF, sizeof(ctx->killers));
     memset(ctx->history, 0, sizeof(ctx->history));
+    memset(ctx->counter, 0xFF, sizeof(ctx->counter));
+    ctx->prev_move = CRS_INF;
     if (ctx->tt) memset(ctx->tt, 0, CRS_TT_SIZE * sizeof(CRSTTEntry));
     ctx->max_depth = (max_depth <= 0) ? (CRS_MAX_PLY - 1) : max_depth;
     ctx->time_limit_ms = (time_limit_ms <= 0.0) ? 1e12 : time_limit_ms;
@@ -129,6 +159,23 @@ static int crs_is_repetition(CRSContext *ctx, uint64_t hash) {
         if (count >= 2) return 1;   /* 2 previous + the current one = 3 */
     }
     return 0;
+}
+
+/* ---- Mate score ply adjustment (Stockfish convention) ----------------- *
+ * See the shogi rule search for the rationale: transpositions can reach
+ * the same position at different plies, so mate distances stored in the
+ * TT must be rooted at the stored node (not the search root) and
+ * de-rooted on probe. Without this, mate scores can leak across the
+ * root and surface as spurious near-mate evals at unrelated positions. */
+static inline int32_t crs_score_to_tt(int32_t s, int ply) {
+    if (s >=  CRS_MATE - CRS_MAX_PLY) return s + ply;
+    if (s <= -CRS_MATE + CRS_MAX_PLY) return s - ply;
+    return s;
+}
+static inline int32_t crs_score_from_tt(int32_t s, int ply) {
+    if (s >=  CRS_MATE - CRS_MAX_PLY) return s - ply;
+    if (s <= -CRS_MATE + CRS_MAX_PLY) return s + ply;
+    return s;
 }
 
 /* ---- TT helpers ------------------------------------------------------- */
@@ -162,6 +209,13 @@ static void crs_score_moves(CRSContext *ctx, const ChessPosition *p,
                              const ChMove *moves, int n, CRSScoredMove *out,
                              int ply, ChMove tt_move) {
     const int8_t *board = p->board;
+    /* Counter-move lookup key from the last move played. */
+    ChMove counter_hint = CRS_INF;
+    if (ctx->prev_move != CRS_INF) {
+        int pf = chmove_from(ctx->prev_move);
+        int pt = chmove_to(ctx->prev_move);
+        counter_hint = ctx->counter[pf * 64 + pt];
+    }
     for (int i = 0; i < n; i++) {
         ChMove m = moves[i];
         int32_t score = 0;
@@ -181,6 +235,9 @@ static void crs_score_moves(CRSContext *ctx, const ChessPosition *p,
             if (ply < CRS_MAX_PLY) {
                 if (ctx->killers[ply][0] == m) score = 5000000;
                 else if (ctx->killers[ply][1] == m) score = 4000000;
+            }
+            if (m == counter_hint && counter_hint != CRS_INF) {
+                score += 3500000;
             }
             score += ctx->history[from * 64 + to];
         }
@@ -206,9 +263,26 @@ static void crs_sort_moves(CRSScoredMove *arr, int n) {
 /* ---- Forward decls ---------------------------------------------------- */
 
 static int32_t crs_alphabeta(CRSContext *ctx, ChessPosition *p,
-                              int depth, int32_t alpha, int32_t beta, int ply);
+                              int depth, int32_t alpha, int32_t beta,
+                              int ply, int allow_null);
 static int32_t crs_quiescence(CRSContext *ctx, ChessPosition *p,
                                int32_t alpha, int32_t beta, int qdepth);
+
+/* Returns 1 if side ``side`` has at least one non-king, non-pawn piece
+ * left on the board. Used to gate null-move pruning — in pawn-only
+ * endings null moves cause zugzwang errors. */
+static int crs_has_pieces(const ChessPosition *p, int side) {
+    const int8_t *board = p->board;
+    for (int sq = 0; sq < 64; sq++) {
+        int8_t v = board[sq];
+        if (v == 0) continue;
+        int pv = v > 0 ? v : -v;
+        int is_side = (v > 0) ? 0 : 1;
+        if (is_side != side) continue;
+        if (pv >= CP_KNIGHT && pv <= CP_QUEEN) return 1;
+    }
+    return 0;
+}
 
 /* ---- Quiescence: captures + promotions ------------------------------ */
 
@@ -255,7 +329,8 @@ static int32_t crs_quiescence(CRSContext *ctx, ChessPosition *p,
 /* ---- Main alpha-beta ------------------------------------------------- */
 
 static int32_t crs_alphabeta(CRSContext *ctx, ChessPosition *p,
-                              int depth, int32_t alpha, int32_t beta, int ply) {
+                              int depth, int32_t alpha, int32_t beta,
+                              int ply, int allow_null) {
     ctx->nodes++;
     if (crs_time_check(ctx)) return 0;
 
@@ -277,18 +352,57 @@ static int32_t crs_alphabeta(CRSContext *ctx, ChessPosition *p,
     CRSTTEntry *tt = crs_tt_probe(ctx, key);
     ChMove tt_move = CRS_INF;
     if (tt && tt->depth >= depth) {
-        if (tt->flag == CRS_TT_EXACT) return tt->score;
-        if (tt->flag == CRS_TT_ALPHA && tt->score <= alpha) return alpha;
-        if (tt->flag == CRS_TT_BETA  && tt->score >= beta)  return beta;
+        int32_t tt_score = crs_score_from_tt(tt->score, ply);
+        if (tt->flag == CRS_TT_EXACT) return tt_score;
+        if (tt->flag == CRS_TT_ALPHA && tt_score <= alpha) return alpha;
+        if (tt->flag == CRS_TT_BETA  && tt_score >= beta)  return beta;
     }
     if (tt) tt_move = tt->best_move;
+
+    /* ---- Static eval for pruning decisions -------------------------- */
+    int32_t static_eval = 0;
+    int have_static = 0;
+    if (!in_check) {
+        static_eval = chess_rule_evaluate(p);
+        have_static = 1;
+    }
+
+    /* ---- Null-move pruning -------------------------------------------
+     * Give the opponent a free move. If they still can't bring our eval
+     * below beta, our position is so good that the current move will
+     * cut off — return beta. Gated on non-pk material (zugzwang) and
+     * shallow depth. */
+    if (allow_null && depth >= 3 && !in_check && have_static
+        && static_eval >= beta
+        && crs_has_pieces(p, p->side)) {
+        int R = 2 + (depth >= 6 ? 1 : 0);
+        /* Make null move: flip side, clear ep square. */
+        ChessPosition save = *p;
+        if (p->ep_square >= 0) {
+            p->hash ^= g_chess_z_ep_file[cp_file(p->ep_square)];
+        }
+        p->hash ^= g_chess_z_side;
+        p->ep_square = -1;
+        p->side ^= 1;
+        int32_t nscore = -crs_alphabeta(ctx, p, depth - 1 - R,
+                                          -beta, -beta + 1, ply + 1, 0);
+        *p = save;
+        if (ctx->time_up) return 0;
+        if (nscore >= beta) return beta;
+    }
 
     ChMove moves[CHESS_MAX_MOVES];
     int nm = chess_expand_legal_moves(p, moves);
     if (nm == 0) {
         /* No legal moves: checkmate in check, else stalemate = draw. */
-        if (in_check) return -CRS_MATE + (ctx->max_depth - depth);
+        if (in_check) return -CRS_MATE + ply;
         return 0;
+    }
+
+    /* ---- Futility pruning setup ------------------------------------- */
+    int futile = 0;
+    if (depth <= 3 && !in_check && have_static) {
+        if (static_eval + CRS_FUTILITY_MARGIN[depth] <= alpha) futile = 1;
     }
 
     CRSScoredMove scored[CHESS_MAX_MOVES];
@@ -301,7 +415,8 @@ static int32_t crs_alphabeta(CRSContext *ctx, ChessPosition *p,
     ChMove best_move = scored[0].move;
 
     /* Push current hash into history for repetition detection inside
-     * recursive children. */
+     * recursive children. Save prev_move so we can restore it on exit. */
+    ChMove saved_prev = ctx->prev_move;
     if (ctx->hist_n < CRS_HISTORY_MAX) {
         ctx->hist[ctx->hist_n++] = p->hash;
     }
@@ -312,9 +427,42 @@ static int32_t crs_alphabeta(CRSContext *ctx, ChessPosition *p,
         int is_promo = (chmove_promo(m) != 0);
         int is_quiet = !is_cap && !is_promo;
 
+        /* Futility pruning: skip quiet moves past the first when the
+         * static eval is hopelessly below alpha. */
+        if (futile && i > 0 && is_quiet) continue;
+
         ChessUndo u;
         if (chess_make_move(p, m, &u) != 0) continue;
-        int32_t score = -crs_alphabeta(ctx, p, depth - 1, -beta, -alpha, ply + 1);
+
+        /* LMR: reduce depth for late quiet moves in non-check positions.
+         * Re-search at full depth if the reduced search exceeds alpha. */
+        int reduction = 0;
+        if (i >= 3 && depth >= 3 && !in_check && is_quiet) {
+            int di = depth < 64 ? depth : 63;
+            int mi = i < 64 ? i : 63;
+            reduction = ctx->lmr[di][mi];
+            if (reduction >= depth - 1) reduction = depth - 2;
+            if (reduction < 0) reduction = 0;
+        }
+
+        ctx->prev_move = m;
+        int32_t score;
+        if (i == 0) {
+            score = -crs_alphabeta(ctx, p, depth - 1, -beta, -alpha,
+                                     ply + 1, 1);
+        } else {
+            score = -crs_alphabeta(ctx, p, depth - 1 - reduction,
+                                     -alpha - 1, -alpha, ply + 1, 1);
+            if (!ctx->time_up && reduction > 0 && score > alpha) {
+                score = -crs_alphabeta(ctx, p, depth - 1,
+                                         -alpha - 1, -alpha, ply + 1, 1);
+            }
+            if (!ctx->time_up && score > alpha && score < beta) {
+                score = -crs_alphabeta(ctx, p, depth - 1,
+                                         -beta, -alpha, ply + 1, 1);
+            }
+        }
+        ctx->prev_move = saved_prev;
         chess_unmake_move(p, &u);
         if (ctx->time_up) {
             if (ctx->hist_n > 0) ctx->hist_n--;
@@ -336,8 +484,15 @@ static int32_t crs_alphabeta(CRSContext *ctx, ChessPosition *p,
                 int from = chmove_from(m);
                 int to = chmove_to(m);
                 ctx->history[from * 64 + to] += depth * depth;
+                /* Counter-move: the move that refuted prev_move. */
+                if (saved_prev != CRS_INF) {
+                    int pf = chmove_from(saved_prev);
+                    int pt = chmove_to(saved_prev);
+                    ctx->counter[pf * 64 + pt] = m;
+                }
             }
-            crs_tt_store(ctx, key, depth, beta, CRS_TT_BETA, m);
+            crs_tt_store(ctx, key, depth,
+                          crs_score_to_tt(beta, ply), CRS_TT_BETA, m);
             if (ctx->hist_n > 0) ctx->hist_n--;
             return beta;
         }
@@ -346,7 +501,8 @@ static int32_t crs_alphabeta(CRSContext *ctx, ChessPosition *p,
     if (ctx->hist_n > 0) ctx->hist_n--;
 
     uint8_t flag = (best_score <= orig_alpha) ? CRS_TT_ALPHA : CRS_TT_EXACT;
-    crs_tt_store(ctx, key, depth, best_score, flag, best_move);
+    crs_tt_store(ctx, key, depth,
+                  crs_score_to_tt(best_score, ply), flag, best_move);
     return best_score;
 }
 
@@ -386,7 +542,7 @@ static void crs_search_root(CRSContext *ctx, ChessPosition *p,
             ChMove m = scored[i].move;
             ChessUndo u;
             if (chess_make_move(p, m, &u) != 0) continue;
-            int32_t score = -crs_alphabeta(ctx, p, d - 1, -beta, -alpha, 1);
+            int32_t score = -crs_alphabeta(ctx, p, d - 1, -beta, -alpha, 1, 1);
             chess_unmake_move(p, &u);
             if (ctx->time_up) break;
             if (score > best_score) {
