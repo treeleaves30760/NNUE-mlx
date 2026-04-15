@@ -154,6 +154,18 @@ def generate_data(game_name: str, fs, config: dict,
 
     data_file = str(data_dir / f"{game_name}_iter{iteration}.bin")
 
+    # Skip regeneration on resume if a prior run already produced the
+    # data file for this iteration. The self-play generation is the most
+    # expensive step in the loop, so crashing during the subsequent
+    # training phase should not cost us another full round of games.
+    # A sizeable file (>100 KB) is treated as complete; otherwise it's
+    # likely a partial write from a crashed worker and we regenerate.
+    existing = Path(data_file)
+    if existing.exists() and existing.stat().st_size > 100_000:
+        sz_mb = existing.stat().st_size / 1024 / 1024
+        print(f"  Reusing existing {data_file} ({sz_mb:.1f}MB)")
+        return data_file
+
     evaluator = None
     if is_bootstrap:
         from src.search.alphabeta import create_rule_based_search
