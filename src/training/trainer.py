@@ -292,10 +292,25 @@ class Trainer:
             num_batches += 1
         return (total_loss / max(num_batches, 1)).item()
 
+    # Non-parameter metadata that `export_numpy` writes alongside weights.
+    # Must be stripped on load so `model.load_weights` doesn't reject them.
+    _EXPORT_METADATA_KEYS = frozenset({
+        "num_output_buckets",
+        "output_eval_scale",
+        "quant_scale",
+        "l1_scale",
+        "l2_scale",
+        "output_scale",
+    })
+
     def load_weights_from_npz(self, npz_path: str, total_epochs: int = 100):
         """Load model weights from an exported .npz file (for warm-starting)."""
         data = np.load(npz_path)
-        weights = [(k, mx.array(data[k])) for k in data.files]
+        weights = [
+            (k, mx.array(data[k]))
+            for k in data.files
+            if k not in self._EXPORT_METADATA_KEYS
+        ]
         self.model.load_weights(weights)
         # Reset optimizer state for the new iteration
         self.optimizer = optim.Adam(learning_rate=self._lr)
@@ -355,7 +370,16 @@ class Trainer:
                 )
 
         weights["num_output_buckets"] = np.array(self.num_output_buckets, dtype=np.int32)
-        weights["output_eval_scale"] = np.array(128.0, dtype=np.float32)
+        # Must equal OUTPUT_SCALE from src/training/loss.py: the loss passes
+        # model output through sigmoid(raw * OUTPUT_SCALE / EVAL_SCALE), so a
+        # converged model produces raw = score / OUTPUT_SCALE. Inference
+        # inverts that by multiplying by OUTPUT_SCALE. Old checkpoints
+        # stored 128.0 here by mistake; _build_from_data detects that and
+        # rewrites it to the correct value on load.
+        from src.training.loss import OUTPUT_SCALE as _LOSS_OUTPUT_SCALE
+        weights["output_eval_scale"] = np.array(
+            float(_LOSS_OUTPUT_SCALE), dtype=np.float32
+        )
 
         np.savez(npz_path, **weights)
         print(f"Exported numpy weights to {npz_path}")

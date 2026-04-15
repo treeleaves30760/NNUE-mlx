@@ -371,7 +371,11 @@ class TestEvaluatorMetadata:
             path = os.path.join(td, "m.npz")
             np.savez(path, **weights)
             ev = NNUEEvaluator.from_numpy(path, fs)
-            assert abs(ev.output_eval_scale - 128.0) < 1e-6
+            # Default must equal the class constant (OUTPUT_SCALE=32), which
+            # matches the inverse of the training loss scaling. Older code
+            # used 128 here, inflating every NNUE score 4x and wrecking
+            # adjudication thresholds during self-play and evaluation.
+            assert abs(ev.output_eval_scale - 32.0) < 1e-6
             assert ev.num_output_buckets == 1
 
 

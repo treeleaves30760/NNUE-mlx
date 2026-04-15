@@ -53,8 +53,16 @@ except ImportError:
 class NNUEEvaluator:
     """Wraps the incremental accumulator for use in alpha-beta search."""
 
-    # Class-level default; overridden per-instance when loaded from file.
-    EVAL_OUTPUT_SCALE = 128.0
+    # Inverse of training's OUTPUT_SCALE. nnue_loss maps model output to
+    # centipawns via `p = sigmoid(raw * OUTPUT_SCALE / EVAL_SCALE)`, so a
+    # converged network outputs `raw = score / OUTPUT_SCALE`. To recover
+    # centipawns at inference we multiply by OUTPUT_SCALE (=32). Earlier
+    # this was hardcoded to 128 which inflated every NNUE score 4x — big
+    # enough to trigger adjudication thresholds (+/-1000cp win, 15cp draw)
+    # on nearly every quiet position, so NNUE games were decided by those
+    # thresholds instead of actual play. Old npz files wrote 128 into the
+    # metadata; _build_from_data re-normalises them below.
+    EVAL_OUTPUT_SCALE = 32.0
 
     def __init__(self, accumulator: IncrementalAccumulator,
                  feature_set: FeatureSet):
@@ -136,13 +144,32 @@ class NNUEEvaluator:
     @classmethod
     def _build_from_data(cls, data, feature_set: FeatureSet) -> "NNUEEvaluator":
         """Build evaluator from weight data (dict or NpzFile)."""
+        def _scalar(key, default):
+            # Accept both 0-dim and 1-dim (length-1) scalar arrays, plus
+            # plain Python numbers. SharedWeightsManager promotes 0-dim
+            # arrays to shape (1,) via ascontiguousarray, so float() alone
+            # isn't enough when weights arrive via shared memory.
+            if key not in data:
+                return default
+            v = data[key]
+            if hasattr(v, "item"):
+                return v.item()
+            return v
+
         ft_weight = data["feature_table.weight"]
         is_quantized = ft_weight.dtype == np.int16
-        quant_scale = float(data["quant_scale"]) if "quant_scale" in data else 512.0
+        quant_scale = float(_scalar("quant_scale", 512.0))
 
         # Read metadata (optional keys; graceful fallback for old models).
-        output_eval_scale = float(data["output_eval_scale"]) if "output_eval_scale" in data else cls.EVAL_OUTPUT_SCALE
-        num_output_buckets = int(data["num_output_buckets"]) if "num_output_buckets" in data else 1
+        # Old checkpoints (pre 2026-04-15) saved the incorrect 128.0 scale —
+        # detect that specific value and remap to the correct OUTPUT_SCALE
+        # so those weights can still be loaded and produce sane evaluations.
+        stored_scale = float(_scalar("output_eval_scale", cls.EVAL_OUTPUT_SCALE))
+        if abs(stored_scale - 128.0) < 1e-6:
+            output_eval_scale = cls.EVAL_OUTPUT_SCALE  # 32.0
+        else:
+            output_eval_scale = stored_scale
+        num_output_buckets = int(_scalar("num_output_buckets", 1))
 
         # Assemble mutable weight dict so int8 dequant can update entries.
         weights: dict = {
@@ -159,7 +186,7 @@ class NNUEEvaluator:
         ]:
             w = weights[key]
             if w.dtype == np.int8:
-                scale = float(data[scale_key])
+                scale = float(_scalar(scale_key, 1.0))
                 weights[key] = w.astype(np.float32) * scale
 
         if is_quantized and _HAS_ACCEL:

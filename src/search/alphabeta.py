@@ -367,11 +367,19 @@ class AlphaBetaSearch(_NegamaxMixin):
                 and isinstance(evaluator.accumulator, _AccelAccum)):
             try:
                 cfg = getattr(evaluator.feature_set, '_num_squares', 64)
+                # Prefer the per-instance scale (loaded from npz metadata
+                # with old-checkpoint remapping applied) over the class
+                # default, so warm-loaded models carry their corrected
+                # scale into the C search.
+                scale = getattr(
+                    evaluator, 'output_eval_scale',
+                    getattr(evaluator, 'EVAL_OUTPUT_SCALE', 32.0),
+                )
                 self._csearch = _CSearch(
                     accumulator=evaluator.accumulator,
                     feature_set=evaluator.feature_set,
                     tt_size=1 << 20,
-                    eval_scale=getattr(evaluator, 'EVAL_OUTPUT_SCALE', 128.0),
+                    eval_scale=scale,
                     max_sq=cfg,
                 )
             except Exception:
