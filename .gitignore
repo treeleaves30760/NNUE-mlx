@@ -21,6 +21,10 @@ models/20??-*/
 # Pipeline logs & state
 pipeline_run*.log
 pipeline_state*.json
+logs/
+
+# Claude Code runtime (scheduled_tasks.lock, memory cache, etc.)
+.claude/
 
 # OS
 .DS_Store
