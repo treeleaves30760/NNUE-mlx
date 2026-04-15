@@ -30,6 +30,13 @@ static PyMethodDef module_methods[] = {
      "Self-contained alpha-beta shogi rule-based search (pure C). "
      "Args: (board, sente_hand, gote_hand, side, max_depth, [time_ms]). "
      "Returns ((from, to, promo, drop), score, nodes) or None."},
+    {"shogi_rule_search_reset", accel_shogi_rule_search_reset, METH_VARARGS,
+     "Clear the shogi rule-based search TT + killers + history. "
+     "Call between unrelated positions (e.g. between self-play games) "
+     "so stale entries don't pollute new searches. Within a single "
+     "game, leave the TT warm for move-to-move tree reuse. "
+     "Optional arg node_limit (long): when > 0, every following search "
+     "call aborts after visiting this many nodes. Pass 0 for unlimited."},
     {"shogi_rule_search_live", accel_shogi_rule_search_live, METH_VARARGS,
      "Shogi rule-based search with a live progress callback. "
      "Args: (board, sente_hand, gote_hand, side, max_depth, time_ms, "

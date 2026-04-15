@@ -91,6 +91,12 @@ typedef struct {
     int   time_up;
     int   stop;
     long  nodes;
+    /* Optional hard cap on visited nodes per search call. 0 = unlimited.
+     * When hit, sets time_up so the search unwinds cleanly through the
+     * same early-exit paths the time limit uses. Guards against the
+     * endgame-tactical tree explosion where check extensions + drop
+     * moves can inflate one call by 100x. */
+    long  node_limit;
 
     /* LMR table */
     int8_t lmr[64][64];
@@ -148,6 +154,7 @@ static void srs_context_init(SRSContext *ctx) {
         ctx->tt = (SRSTTEntry *)calloc(SRS_TT_SIZE, sizeof(SRSTTEntry));
         ctx->tt_mask = SRS_TT_SIZE - 1;
     }
+    ctx->node_limit = 0;  /* unlimited by default; caller may set via reset */
     srs_lmr_init(ctx);
     g_srs_initialized = 1;
 }
@@ -156,7 +163,12 @@ static void srs_reset_for_search(SRSContext *ctx, int max_depth,
                                   double time_limit_ms) {
     memset(ctx->killers, 0xFF, sizeof(ctx->killers));
     memset(ctx->history, 0, sizeof(ctx->history));
-    if (ctx->tt) memset(ctx->tt, 0, SRS_TT_SIZE * sizeof(SRSTTEntry));
+    /* Keep the TT warm across calls: depth-preferred replacement plus the
+     * NON_MATE_CAP safety net make stale entries harmless, and self-play
+     * move-to-move position overlap gives a big win from reusing the tree.
+     * A clean slate is only needed when the caller jumps to an unrelated
+     * position (e.g. a fresh game); that is handled externally via
+     * shogi_rule_search_reset(). */
     /* Sentinel handling:
      *   max_depth <= 0   -> "effectively infinite" (cap at SRS_MAX_PLY/2)
      *   time_limit <= 0  -> "no time limit" (huge value)
@@ -169,6 +181,8 @@ static void srs_reset_for_search(SRSContext *ctx, int max_depth,
     ctx->time_up = 0;
     ctx->stop = 0;
     ctx->nodes = 0;
+    /* node_limit is NOT reset here: it is a sticky per-context setting
+     * that the caller configures once and reuses across searches. */
 
     ctx->progress_cb = NULL;
     ctx->cb_interval = 1000000;
@@ -302,6 +316,12 @@ static void srs_fire_progress(SRSContext *ctx, int done) {
 }
 
 static inline int srs_time_check(SRSContext *ctx) {
+    /* Node budget: checked on every node (cheap counter compare). Ends
+     * the search in a clean way through the same time_up path. */
+    if (ctx->node_limit > 0 && ctx->nodes >= ctx->node_limit) {
+        ctx->time_up = 1;
+        return 1;
+    }
     if ((ctx->nodes & 4095) == 0) {
         double now = srs_now_ms();
         if (now - ctx->start_time_ms >= ctx->time_limit_ms) {
@@ -862,6 +882,32 @@ static PyObject *accel_shogi_rule_search(PyObject *self, PyObject *args) {
         PyLong_FromLong(g_srs.nodes));
     Py_DECREF(move_tuple);
     return result;
+}
+
+/* ------------------------------------------------------------------------
+ *  shogi_rule_search_reset([node_limit=None]) -> None
+ *
+ *  Clear the transposition table and heuristics. Call this between
+ *  unrelated positions (e.g. when starting a new self-play game) so
+ *  stale entries from the previous game do not pollute the new search.
+ *  Within a single game, leave the TT warm: move-to-move position
+ *  overlap gives a large speedup from reusing the tree.
+ *
+ *  Optional node_limit (long): when > 0, every subsequent search call
+ *  aborts once it has visited this many nodes. Use this to bound the
+ *  endgame tactical-tree explosion (check extensions + drop moves can
+ *  balloon one call 100x). Pass 0 or omit to leave unlimited.
+ * ----------------------------------------------------------------------- */
+static PyObject *accel_shogi_rule_search_reset(PyObject *self, PyObject *args) {
+    (void)self;
+    long node_limit = -1;  /* -1 = leave unchanged */
+    if (!PyArg_ParseTuple(args, "|l", &node_limit)) return NULL;
+    if (!g_srs_initialized) srs_context_init(&g_srs);
+    if (g_srs.tt) memset(g_srs.tt, 0, SRS_TT_SIZE * sizeof(SRSTTEntry));
+    memset(g_srs.killers, 0xFF, sizeof(g_srs.killers));
+    memset(g_srs.history, 0, sizeof(g_srs.history));
+    if (node_limit >= 0) g_srs.node_limit = node_limit;
+    Py_RETURN_NONE;
 }
 
 /* ------------------------------------------------------------------------

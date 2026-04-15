@@ -85,6 +85,11 @@ except ImportError:
     _c_shogi_rule_search_live = None
 
 try:
+    from src.accel._nnue_accel import shogi_rule_search_reset as _c_shogi_rule_search_reset
+except ImportError:
+    _c_shogi_rule_search_reset = None
+
+try:
     from src.accel._nnue_accel import chess_c_rule_search as _c_chess_rule_search
 except ImportError:
     _c_chess_rule_search = None
@@ -107,6 +112,32 @@ class ShogiCRuleSearch:
         self.max_depth = max_depth
         self.time_limit_ms = time_limit_ms
         self.nodes_searched = 0
+        # The TT lives in a single process-global C context and is now
+        # kept warm across move-to-move calls so self-play can amortize
+        # tree reuse across plies. Creating a fresh searcher instance
+        # signals "unrelated position" so we clear the state here to
+        # avoid poisoned entries leaking across tests / game boundaries.
+        self.reset_context()
+
+    # Sticky per-process node cap for every subsequent C search call.
+    # Bounds the endgame tactical-tree explosion (check extensions +
+    # drop moves can balloon one call 100x). The time limit still
+    # applies; whichever fires first wins. 0 disables the cap.
+    node_limit: int = 400_000
+
+    def reset_context(self) -> None:
+        """Clear the global TT + killers + history.
+
+        Call between unrelated positions (e.g. fresh self-play games)
+        so stale entries don't pollute the new search. Within a single
+        game leave the state warm: move-to-move position overlap gives a
+        large speedup from reusing the cached subtrees.
+
+        Also re-asserts the configured node_limit so every new game
+        starts with the same bound.
+        """
+        if _c_shogi_rule_search_reset is not None:
+            _c_shogi_rule_search_reset(int(self.node_limit))
 
     @staticmethod
     def _pack_position(state):
