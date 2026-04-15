@@ -91,6 +91,14 @@ class SelfPlayEngine:
         """
         import math
 
+        # Clear the evaluator's global search state (TT, killers, history)
+        # at the start of every new game so stale entries from the previous
+        # game can't poison the opening search. Within a game the state is
+        # left warm so move-to-move tree reuse gives its speedup.
+        reset = getattr(self.evaluator, "reset_context", None)
+        if callable(reset):
+            reset()
+
         positions = []
         state = initial_state
 
@@ -104,12 +112,15 @@ class SelfPlayEngine:
                 except Exception:
                     pass  # fallback to initial_state
 
-        # Random opening plies as fallback (for games without opening book)
+        # Random opening plies as fallback (for games without opening book).
+        # Spread the distribution across [0, random_opening_plies+2] so the
+        # exact startpos and early-game positions are represented in the
+        # training data. Earlier this clamped the minimum to 2, which meant
+        # the opening feature entries in the FT were never updated by
+        # gradients — the network then produced wild evaluations for the
+        # initial positions encountered during the first moves of eval.
         if self.random_opening_plies > 0 and state is initial_state:
-            n_plies = random.randint(
-                max(2, self.random_opening_plies - 2),
-                self.random_opening_plies + 2,
-            )
+            n_plies = random.randint(0, self.random_opening_plies + 2)
             for _ in range(n_plies):
                 if state.is_terminal():
                     break
@@ -135,8 +146,18 @@ class SelfPlayEngine:
 
             # Get evaluation and pick move
             if self.evaluator:
-                # Temperature-based move selection for early plies
-                if ply < self.TEMP_PLIES and hasattr(self.evaluator, 'search_top_n'):
+                # Temperature-based move selection for early plies. Skipped
+                # when the evaluator exposes a C-native fast path (`_csearch`):
+                # `search_top_n` there falls back to a pure-Python alpha-beta
+                # that runs a full depth-N search *per legal move*, turning
+                # one NNUE d=5 ply into 30+ Python d=4 searches and dropping
+                # self-play throughput ~8x. `random_play_prob` already supplies
+                # exploration for these runs, so the temperature branch is
+                # strictly a cost in that mode.
+                use_temp = (ply < self.TEMP_PLIES
+                            and hasattr(self.evaluator, 'search_top_n')
+                            and getattr(self.evaluator, '_csearch', None) is None)
+                if use_temp:
                     t = ply / max(self.TEMP_PLIES, 1)
                     temp = self.TEMP_START * (1.0 - t) + self.TEMP_END * t
                     if temp > 1.0:
